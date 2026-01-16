@@ -1,0 +1,2157 @@
+{
+    "info": {
+        "name": "Cash Device REST API",
+        "description": "Collection of requests for Cash Device REST API",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Authenticate",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n\t\"Username\": \"admin\",\n\t\"Password\": \"password\"\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/Users/Authenticate",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["Users", "Authenticate"]
+                }
+            }
+        },
+        {
+            "name": "GetConnectedUSBDevices",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetConnectedUSBDevices",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetConnectedUSBDevices"]
+                }
+            }
+        },
+        {
+            "name": "StartDownload",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Authorization",
+                  "value": "Bearer {{token}}"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n    \"DownloadFileName\": \"/storage/emulated/0/Download/GBP01056_NVS2004301038000_IF_01.bv1\",\n    \"ComPort\": 0,\n    \"SspAddress\": 0\n}"
+              },
+              "url": {
+                "raw": "{{baseUrl}}/Download/StartDownload",
+                "host": ["{{baseUrl}}"],
+                "path": ["Download", "StartDownload"]
+              }
+            }
+        },
+        {
+            "name": "GetDownloadStatus",
+            "request": {
+              "method": "GET",
+              "header": [
+                {
+                  "key": "Authorization",
+                  "value": "Bearer {{token}}"
+                }
+              ],
+              "url": {
+                "raw": "{{baseUrl}}/Download/GetDownloadStatus",
+                "host": ["{{baseUrl}}"],
+                "path": ["Download", "GetDownloadStatus"]
+              }
+            }
+          },
+        {
+            "name": "OpenConnection",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n\t\"ComPort\": 0,\n\t\"SspAddress\": 0,\n\t\"LogFilePath\": \"/storage/emulated/0/Documents/ITL_SSP_logs/SSP_Log.log\",\n\t\"SetInhibits\": [\n\t\t{\n\t\t\t\"Denomination\": \"5000 USD\",\n\t\t\t\"Inhibit\": true\n\t\t},\n\t\t{\n\t\t\t\"Denomination\": \"10000 USD\",\n\t\t\t\"Inhibit\": true\n\t\t}\n\t],\n\t\"SetRoutes\": [\n\t\t{\n\t\t\t\"Denomination\": \"100 USD\",\n\t\t\t\"Route\": 2\n\t\t},\n\t\t{\n\t\t\t\"Denomination\": \"500 USD\",\n\t\t\t\"Route\": 3\n\t\t}\n\t],\n    \"SetCashBoxPayoutLimit\": \n    [100,0,50,30,20,5,0],\n\t\"EnableAcceptor\": true,\n\t\"EnableAutoAcceptEscrow\": true,\n\t\"EnablePayout\": true\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/CashDevice/OpenConnection",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice", "OpenConnection"]
+                }
+            }
+        },
+        {
+            "name": "DispenseValue",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n\t\"Value\": 200,\n\t\"CountryCode\": \"USD\"\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/DispenseValue?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","DispenseValue"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "EnableAcceptor",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/EnableAcceptor?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","EnableAcceptor"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "DisableAcceptor",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/DisableAcceptor?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","DisableAcceptor"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "DisconnectDevice",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/DisconnectDevice?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","DisconnectDevice"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "StartDevice",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/StartDevice?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","StartDevice"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "StopDevice",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/StopDevice?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","StopDevice"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "AcceptFromEscrow",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/AcceptFromEscrow?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","AcceptFromEscrow"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetAutoAccept",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "true"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetAutoAccept?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetAutoAccept"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "ReturnFromEscrow",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/ReturnFromEscrow?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","ReturnFromEscrow"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "EnablePayoutDevice",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/EnablePayoutDevice?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","EnablePayoutDevice"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetDenominationInhibits",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"ValueCountryCodes\": [\n    \"100 USD\",\n    \"500 EUR\"\n  ],\n  \"Inhibit\": true\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetDenominationInhibits?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetDenominationInhibits"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetDenominationInhibitByIndex",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Index\": 2,\n  \"Inhibit\": false\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetDenominationInhibitByIndex?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetDenominationInhibitByIndex"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetDenominationInhibit",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Value\": 1000,\n  \"CountryCode\": \"USD\",\n  \"Inhibit\": true\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetDenominationInhibit?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetDenominationInhibit"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetDenominationRoute",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Value\": 1000,\n  \"CountryCode\": \"USD\",\n  \"Route\": 4\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetDenominationRoute?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetDenominationRoute"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "PayoutByDenomination",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Value\": 500,\n  \"CountryCode\": \"USD\",\n  \"NumNotes\": 1\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/PayoutByDenomination?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","PayoutByDenomination"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "PayoutMultipleDenominations",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "[\n  1,\n  0,\n  1,\n  0,\n  0,\n  0\n]"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/PayoutMultipleDenominations?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","PayoutMultipleDenominations"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "Float",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "[\n  2,\n  3,\n  0,\n  5\n]"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/Float?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","Float"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetCashboxPayoutLimit",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "[\n  10,\n  0,\n  6,\n  4,\n  2,\n  1\n]"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetCashboxPayoutLimit?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetCashboxPayoutLimit"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SmartEmpty",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"ModuleNumber\": 0,\n  \"IsNV4000\": true\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SmartEmpty?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SmartEmpty"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SendCustomCommand",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"CustomCommandDataString\": \"17\"\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SendCustomCommand?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SendCustomCommand"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "EnablePayout",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/EnablePayout?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","EnablePayout"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "EnableCoinMechOrFeeder",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Authorization",
+                  "value": "Bearer {{token}}"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "true"
+              },
+              "url": {
+                "raw": "{{baseUrl}}/EnableCoinMechOrFeeder?deviceID={{deviceID}}",
+                "host": ["{{baseUrl}}"],
+                "path": ["CashDevice", "EnableCoinMechOrFeeder"],
+                "query": [
+                  {
+                    "key": "deviceID",
+                    "value": "{{deviceID}}"
+                  }
+                ]
+              }
+            }
+          }
+          ,
+        {
+            "name": "DisablePayout",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/DisablePayout?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","DisablePayout"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "ResetDevice",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/ResetDevice?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","ResetDevice"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "HaltPayout",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/HaltPayout?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","HaltPayout"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "Replenish",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "10"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/Replenish?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","Replenish"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "RefillMode",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "true"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/RefillMode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","RefillMode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetHopperOptions",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Reg0\": 0,\n  \"Reg1\": 0\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetHopperOptions?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetHopperOptions"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "LogRawPackets",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "true"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/LogRawPackets?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","LogRawPackets"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetServiceInformationMaintenanceReset",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"WeekNumber1AsciiByte\": 0,\n  \"WeekNumber2AsciiByte\": 0,\n  \"YearNumber1AsciiByte\": 0,\n  \"YearNumber2AsciiByte\": 0\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetServiceInformationMaintenanceReset?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetServiceInformationMaintenanceReset"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetNoPayinCount",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "0"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetNoPayinCount?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetNoPayinCount"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "Purge",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/Purge?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","Purge"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "PurgeDevice",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "0"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/PurgeDevice?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","PurgeDevice"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "PurgeDeviceHopper",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Device\": 0,\n  \"Hopper\": 0\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/PurgeDeviceHopper?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","PurgeDeviceHopper"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "CoinStir",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "5"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/CoinStir?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","CoinStir"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "CoinStirWithMode",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Seconds\": 5,\n  \"ModeByte\": 1\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/CoinStirWithMode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","CoinStirWithMode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetRealTimeClock",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Byte1\": 0,\n  \"Byte2\": 0,\n  \"Byte3\": 0,\n  \"Byte4\": 0,\n  \"Byte5\": 0,\n  \"Byte6\": 0\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetRealTimeClock?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetRealTimeClock"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetCashboxLevels",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"NumCoinsToAdd\": 10,\n  \"Denomination\": 10,\n  \"CountryCode\": \"USD\"\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetCashboxLevels?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetCashboxLevels"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "ClearCashboxLevels",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/x-www-form-urlencoded"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/ClearCashboxLevels?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","ClearCashboxLevels"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetSorterRoute",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Value\": 100,\n  \"CountryCode\": \"USD\",\n  \"SorterRoute\": 0\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetSorterRoute?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetSorterRoute"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetPayoutLimit",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "5"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetPayoutLimit?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetPayoutLimit"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetTwinMode",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "0"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetTwinMode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetTwinMode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "DeviceState_StartupReady",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "3"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/DeviceState_StartupReady?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","DeviceState_StartupReady"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetBarcodeReaderConfiguration",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"EnableReaders\": 0,\n  \"BarCodeFormat\": 0,\n  \"NumberOfCharacters\": 6\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetBarcodeReaderConfiguration?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetBarcodeReaderConfiguration"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetBarcodeInhibit",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "252"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetBarcodeInhibit?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetBarcodeInhibit"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "SetDenominationLevel",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"Value\": 100,\n  \"CountryCode\": \"USD\",\n  \"NumCoinsToAdd\": 50\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/SetDenominationLevel?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","SetDenominationLevel"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "DeviceErrorLimpMode",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "2"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/DeviceErrorLimpMode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","DeviceErrorLimpMode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "DeviceStateLimpMode",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "2"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/DeviceStateLimpMode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","DeviceStateLimpMode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "UpdateCredentials",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"CurrentUsername\": \"admin\",\n  \"CurrentPassword\": \"password\",\n  \"NewUsername\": \"new username\",\n  \"NewPassword\": \"new password\"\n}"
+                },
+                "url": {
+                    "raw": "{{baseUrl}}/Users/UpdateCredentials",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["Users", "UpdateCredentials"]
+                }
+            }
+        },
+        {
+            "name": "GetDeviceStatus",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetDeviceStatus?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetDeviceStatus"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetAllLevels",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetAllLevels?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetAllLevels"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetCompleteCashDevice",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetCompleteCashDevice?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetCompleteCashDevice"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetHopperOptions",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetHopperOptions?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetHopperOptions"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetGlobalErrorCode",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetGlobalErrorCode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetGlobalErrorCode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetServiceInformation",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetServiceInformation?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetServiceInformation"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetServiceInformationForModule",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetServiceInformationForModule?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetServiceInformationForModule"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetCoinAcceptance",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetCoinAcceptance?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetCoinAcceptance"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetCounters",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetCounters?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetCounters"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetCoinsExit",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetCoinsExit?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetCoinsExit"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetRealTimeClock",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetRealTimeClock?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetRealTimeClock"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetCashboxLevels",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetCashboxLevels?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetCashboxLevels"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetPayoutCount",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetPayoutCount?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetPayoutCount"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "ExtendedGetDatasetVersion",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/ExtendedGetDatasetVersion?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","ExtendedGetDatasetVersion"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "ExtendedGetFirmwareVersion",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/ExtendedGetFirmwareVersion?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","ExtendedGetFirmwareVersion"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "comPortReadError",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/comPortReadError?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","comPortReadError"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetLifterStatus",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetLifterStatus?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetLifterStatus"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetLastRejectCode",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetLastRejectCode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetLastRejectCode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetRCMode",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetRCMode?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetRCMode"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetStoredValue",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetStoredValue?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetStoredValue"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetBarcodeData",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetBarcodeData?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetBarcodeData"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetBarcodeReaderConfiguration",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetBarcodeReaderConfiguration?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetBarcodeReaderConfiguration"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetBarcodeInhibit",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetBarcodeInhibit?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetBarcodeInhibit"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetCurrencyAssignment",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetCurrencyAssignment?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetCurrencyAssignment"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "GetSorterRouteAssignment",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{token}}"
+                    }
+                ],
+                "url": {
+                    "raw": "{{baseUrl}}/GetSorterRouteAssignment?deviceID={{deviceID}}",
+                    "host": ["{{baseUrl}}"],
+                    "path": ["CashDevice","GetSorterRouteAssignment"],
+                    "query": [
+                        {
+                            "key": "deviceID",
+                            "value": "{{deviceID}}"
+                        }
+                    ]
+                }
+            }
+        }
+    ],
+    "variable": [
+        {
+            "key": "baseUrl",
+            "value": "http://127.0.0.1:5000/api"
+        },
+        {
+            "key": "token",
+            "value": ""
+        },
+        {
+            "key": "deviceID",
+            "value": ""
+        }
+    ]
+}

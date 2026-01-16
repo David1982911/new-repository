@@ -1,0 +1,64 @@
+<resources>
+    <string name="app_name">Car Wash Payment</string>
+    
+    <!-- 洗车程序 -->
+    <string name="program_quick">Schnellwäsche</string>
+    <string name="program_standard">Standardwäsche</string>
+    <string name="program_premium">Premiumwäsche</string>
+    
+    <!-- 增值服务 -->
+    <string name="addon_wax">Wachsbehandlung</string>
+    <string name="addon_interior">Innenraumreinigung</string>
+    <string name="addon_tire">Reifenpflege</string>
+    
+    <!-- 支付方式 -->
+    <string name="payment_card">Karte (Visa/MasterCard/MIR + Apple Pay/Google Pay)</string>
+    <string name="payment_cash">Bargeld</string>
+    
+    <!-- 页面1: 选择程序 -->
+    <string name="welcome_message">Willkommen</string>
+    <string name="select_program_title">Wählen Sie ein Waschprogramm</string>
+    <string name="select_program_hint">Bitte wählen Sie ein Waschprogramm, um fortzufahren</string>
+    <string name="addon_services_title">Zusätzliche Services</string>
+    <string name="button_continue">Weiter</string>
+    <string name="price_format">%.2f €</string>
+    <string name="duration_format">%d Min.</string>
+    <string name="language_de">DE</string>
+    <string name="language_en">EN</string>
+    
+    <!-- 页面2: 选择支付 -->
+    <string name="select_payment_title">Zahlungsmethode wählen</string>
+    <string name="selected_program">Ausgewähltes Programm: %1$s</string>
+    <string name="total_price">Gesamtpreis: %1$s</string>
+    <string name="payment_confirmation">Ich bestätige, dass ich mit den Nutzungsregeln vertraut bin</string>
+    <string name="button_pay">Zahlen</string>
+    <string name="error_select_payment">Bitte wählen Sie eine Zahlungsmethode</string>
+    <string name="error_confirm_payment">Bitte bestätigen Sie die Zahlung</string>
+    <string name="rules_confirmation_required">Bitte bestätigen Sie, dass Sie mit den Nutzungsregeln vertraut sind</string>
+    
+    <!-- 页面3: 洗车进行中 -->
+    <string name="payment_success">Zahlung erfolgreich!</string>
+    <string name="washing_in_progress">Waschvorgang läuft...</string>
+    <string name="washing_message">Bitte warten Sie, während Ihr Fahrzeug gewaschen wird.</string>
+    <string name="washing_status_placeholder">Status: Wird verarbeitet...</string>
+    <string name="button_finish">Fertig</string>
+    
+    <!-- 交易列表 -->
+    <string name="transaction_list_title">Transaktionsliste</string>
+    <string name="transaction_count">Anzahl</string>
+    <string name="total_amount">Gesamtbetrag</string>
+    <string name="no_transactions">Keine Transaktionen</string>
+    <string name="payment_card_short">Karte</string>
+    <string name="payment_cash_short">Bargeld</string>
+    <string name="transaction_result_success">Erfolgreich</string>
+    <string name="transaction_result_failed">Fehlgeschlagen</string>
+    <string name="transaction_result_cancelled">Abgebrochen</string>
+    <string name="button_back">Zurück</string>
+    <string name="button_export_csv">CSV exportieren</string>
+    <string name="export_csv_success">CSV erfolgreich exportiert</string>
+    <string name="export_csv_failed">CSV-Export fehlgeschlagen</string>
+    <string name="button_export_excel">Excel exportieren</string>
+    <string name="export_excel_success">Excel erfolgreich exportiert</string>
+    <string name="export_excel_failed">Excel-Export fehlgeschlagen</string>
+    <string name="export_no_data">Keine Daten zum Exportieren</string>
+</resources>

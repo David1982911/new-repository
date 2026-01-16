@@ -1,0 +1,64 @@
+<resources>
+    <string name="app_name">Car Wash Payment</string>
+    
+    <!-- Wash Programs -->
+    <string name="program_quick">Quick Wash</string>
+    <string name="program_standard">Standard Wash</string>
+    <string name="program_premium">Premium Wash</string>
+    
+    <!-- Add-on Services -->
+    <string name="addon_wax">Wax Treatment</string>
+    <string name="addon_interior">Interior Cleaning</string>
+    <string name="addon_tire">Tire Care</string>
+    
+    <!-- Payment Methods -->
+    <string name="payment_card">Card (Visa/MasterCard/MIR + Apple Pay/Google Pay)</string>
+    <string name="payment_cash">Cash</string>
+    
+    <!-- Page 1: Select Program -->
+    <string name="welcome_message">Welcome</string>
+    <string name="select_program_title">Select a Wash Program</string>
+    <string name="select_program_hint">Please select a wash program to continue</string>
+    <string name="addon_services_title">Additional Services</string>
+    <string name="button_continue">Continue</string>
+    <string name="price_format">%.2f €</string>
+    <string name="duration_format">%d Min.</string>
+    <string name="language_de">DE</string>
+    <string name="language_en">EN</string>
+    
+    <!-- Page 2: Select Payment -->
+    <string name="select_payment_title">Select Payment Method</string>
+    <string name="selected_program">Selected Program: %1$s</string>
+    <string name="total_price">Total Price: %1$s</string>
+    <string name="payment_confirmation">I confirm that I am familiar with the rules of use</string>
+    <string name="button_pay">Pay</string>
+    <string name="error_select_payment">Please select a payment method</string>
+    <string name="error_confirm_payment">Please confirm the payment</string>
+    <string name="rules_confirmation_required">Please confirm that you are familiar with the rules of use</string>
+    
+    <!-- Page 3: Washing In Progress -->
+    <string name="payment_success">Payment Successful!</string>
+    <string name="washing_in_progress">Washing in Progress...</string>
+    <string name="washing_message">Please wait while your vehicle is being washed.</string>
+    <string name="washing_status_placeholder">Status: Processing...</string>
+    <string name="button_finish">Finish</string>
+    
+    <!-- Transaction List -->
+    <string name="transaction_list_title">Transaction List</string>
+    <string name="transaction_count">Count</string>
+    <string name="total_amount">Total Amount</string>
+    <string name="no_transactions">No transactions</string>
+    <string name="payment_card_short">Card</string>
+    <string name="payment_cash_short">Cash</string>
+    <string name="transaction_result_success">Success</string>
+    <string name="transaction_result_failed">Failed</string>
+    <string name="transaction_result_cancelled">Cancelled</string>
+    <string name="button_back">Back</string>
+    <string name="button_export_csv">Export CSV</string>
+    <string name="export_csv_success">CSV exported successfully</string>
+    <string name="export_csv_failed">CSV export failed</string>
+    <string name="button_export_excel">Export Excel</string>
+    <string name="export_excel_success">Excel exported successfully</string>
+    <string name="export_excel_failed">Excel export failed</string>
+    <string name="export_no_data">No data to export</string>
+</resources>
