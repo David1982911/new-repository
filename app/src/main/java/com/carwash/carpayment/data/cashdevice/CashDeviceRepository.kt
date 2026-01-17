@@ -5,6 +5,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.SerializationException
+import okhttp3.ResponseBody
+import retrofit2.Response
 
 /**
  * 现金设备 Repository
@@ -19,6 +21,16 @@ class CashDeviceRepository(
         private const val TAG = "CashDeviceRepository"
         private const val DEFAULT_USERNAME = "admin"
         private const val DEFAULT_PASSWORD = "password"
+        
+        /**
+         * 清理响应体的 BOM 和空白字符
+         * @param body 响应体字符串
+         * @return 清理后的字符串
+         */
+        private fun cleanResponseBody(body: String?): String {
+            if (body == null) return ""
+            return body.trim().removePrefix("\uFEFF")  // 移除 BOM
+        }
         
         // 探测超时时间（秒）- 调大到 12 秒，因为 OpenConnection 需要等待设备响应
         private const val PROBE_TIMEOUT_SECONDS = 12L
@@ -94,6 +106,9 @@ class CashDeviceRepository(
     // 设备映射：Port -> SspAddress
     private var billAcceptorMapping: Pair<Int, Int>? = null  // (Port, SspAddress)
     private var coinAcceptorMapping: Pair<Int, Int>? = null  // (Port, SspAddress)
+    
+    // 设备状态缓存：deviceID -> DeviceStatusResponse（用于空数组时返回上一次状态）
+    private val lastKnownStatus = mutableMapOf<String, DeviceStatusResponse>()
     
     /**
      * 认证
@@ -560,17 +575,19 @@ class CashDeviceRepository(
     
     /**
      * 启动设备
+     * 注意：服务器返回 text/plain 纯文本，response.isSuccessful 即认为成功
      */
     suspend fun startDevice(deviceID: String): Boolean {
         return try {
             Log.d(TAG, "启动设备: deviceID=$deviceID")
             val response = api.startDevice(deviceID)
-            Log.d(TAG, "StartDevice 响应: success=${response.success}, error=${response.error ?: "null"}")
-            if (response.success) {
-                Log.d(TAG, "设备启动成功: deviceID=$deviceID")
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "StartDevice 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            if (response.isSuccessful) {
+                Log.d(TAG, "设备启动成功: deviceID=$deviceID, body=$bodyText")
                 true
             } else {
-                Log.e(TAG, "设备启动失败: deviceID=$deviceID, error=${response.error ?: "未知错误"}")
+                Log.e(TAG, "设备启动失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
                 false
             }
         } catch (e: Exception) {
@@ -581,17 +598,19 @@ class CashDeviceRepository(
     
     /**
      * 启用接收器
+     * 注意：服务器返回 text/plain 纯文本（如 "Message: Acceptor enabled successfully."），response.isSuccessful 即认为成功
      */
     suspend fun enableAcceptor(deviceID: String): Boolean {
         return try {
             Log.d(TAG, "启用接收器: deviceID=$deviceID")
             val response = api.enableAcceptor(deviceID)
-            Log.d(TAG, "EnableAcceptor 响应: success=${response.success}, error=${response.error ?: "null"}")
-            if (response.success) {
-                Log.d(TAG, "接收器启用成功: deviceID=$deviceID")
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "EnableAcceptor 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            if (response.isSuccessful) {
+                Log.d(TAG, "接收器启用成功: deviceID=$deviceID, body=$bodyText")
                 true
             } else {
-                Log.e(TAG, "接收器启用失败: deviceID=$deviceID, error=${response.error ?: "未知错误"}")
+                Log.e(TAG, "接收器启用失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
                 false
             }
         } catch (e: Exception) {
@@ -602,37 +621,42 @@ class CashDeviceRepository(
     
     /**
      * 禁用接收器
+     * 注意：服务器返回 text/plain 纯文本，response.isSuccessful 即认为成功
      */
     suspend fun disableAcceptor(deviceID: String): Boolean {
         return try {
             Log.d(TAG, "禁用接收器: deviceID=$deviceID")
             val response = api.disableAcceptor(deviceID)
-            if (response.success) {
-                Log.d(TAG, "接收器禁用成功")
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "DisableAcceptor 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            if (response.isSuccessful) {
+                Log.d(TAG, "接收器禁用成功: deviceID=$deviceID, body=$bodyText")
                 true
             } else {
-                Log.e(TAG, "接收器禁用失败: ${response.error}")
+                Log.e(TAG, "接收器禁用失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
                 false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "禁用接收器异常", e)
+            Log.e(TAG, "禁用接收器异常: deviceID=$deviceID", e)
             false
         }
     }
     
     /**
      * 设置自动接受
+     * 注意：服务器返回 text/plain 纯文本（如 "Message: Auto-accept set to True"），response.isSuccessful 即认为成功
      */
     suspend fun setAutoAccept(deviceID: String, autoAccept: Boolean = true): Boolean {
         return try {
             Log.d(TAG, "设置自动接受: deviceID=$deviceID, autoAccept=$autoAccept")
             val response = api.setAutoAccept(deviceID, autoAccept)
-            Log.d(TAG, "SetAutoAccept 响应: success=${response.success}, error=${response.error ?: "null"}")
-            if (response.success) {
-                Log.d(TAG, "自动接受设置成功: deviceID=$deviceID, autoAccept=$autoAccept")
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "SetAutoAccept 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            if (response.isSuccessful) {
+                Log.d(TAG, "自动接受设置成功: deviceID=$deviceID, autoAccept=$autoAccept, body=$bodyText")
                 true
             } else {
-                Log.e(TAG, "自动接受设置失败: deviceID=$deviceID, autoAccept=$autoAccept, error=${response.error ?: "未知错误"}")
+                Log.e(TAG, "自动接受设置失败: deviceID=$deviceID, autoAccept=$autoAccept, code=${response.code()}, body=$bodyText")
                 false
             }
         } catch (e: Exception) {
@@ -642,50 +666,136 @@ class CashDeviceRepository(
     }
     
     /**
-     * 获取设备状态（容错处理：服务器可能返回空数组 []）
+     * 获取设备状态（服务器返回 List<DeviceStatusResponse>，可能为空数组 []）
+     * @return DeviceStatusResponse 如果数组为空，返回缓存的上一次状态或 UNKNOWN；否则返回最后一个元素（通常代表最新状态）
      */
-    suspend fun getDeviceStatus(deviceID: String): DeviceStatusResponse? {
+    suspend fun getDeviceStatus(deviceID: String): DeviceStatusResponse {
         return try {
             Log.d(TAG, "获取设备状态: deviceID=$deviceID")
-            val response = api.getDeviceStatus(deviceID)
-            Log.d(TAG, "GetDeviceStatus 响应: deviceID=${response.deviceID ?: "null"}, status=${response.status ?: "null"}, error=${response.error ?: "null"}")
-            response
+            val statusList = api.getDeviceStatus(deviceID)
+            val rawCount = statusList.size
+            Log.d(TAG, "GetDeviceStatus 响应: rawCount=$rawCount")
+            
+            if (statusList.isEmpty()) {
+                // 空数组：返回缓存的上一次状态或 UNKNOWN
+                val cachedStatus = lastKnownStatus[deviceID]
+                if (cachedStatus != null) {
+                    Log.d(TAG, "设备状态数组为空 []，沿用上次状态=${cachedStatus.actualState}: deviceID=$deviceID")
+                    return cachedStatus
+                } else {
+                    Log.d(TAG, "设备状态数组为空 []，无缓存，返回 UNKNOWN: deviceID=$deviceID")
+                    val unknownStatus = DeviceStatusResponse(
+                        type = null,
+                        state = "UNKNOWN",
+                        stateAsString = "Unknown"
+                    )
+                    lastKnownStatus[deviceID] = unknownStatus  // 缓存 UNKNOWN 状态
+                    return unknownStatus
+                }
+            }
+            
+            // 取最后一个元素（通常代表最新状态）
+            val latestStatus = statusList.last()
+            val latestState = latestStatus.actualState ?: "UNKNOWN"
+            
+            Log.d(TAG, "GetDeviceStatus 最新状态: latestState=$latestState, rawCount=$rawCount")
+            
+            // 映射状态字符串到内部枚举（如果需要）
+            // 状态可能的值：IDLE, STARTED, CONNECTED, BUSY, ERROR, UNKNOWN 等
+            val mappedState = when (latestState.uppercase()) {
+                "IDLE", "IDLING" -> "IDLE"
+                "STARTED", "STARTING" -> "STARTED"
+                "CONNECTED", "CONNECTING" -> "CONNECTED"
+                "BUSY", "PROCESSING", "PROCESSINGNOTE", "PROCESSINGCOIN" -> "BUSY"
+                "ERROR", "FAILED", "FAULT" -> "ERROR"
+                "UNKNOWN" -> "UNKNOWN"
+                else -> {
+                    Log.w(TAG, "未知状态字符串: $latestState，映射为 UNKNOWN")
+                    "UNKNOWN"
+                }
+            }
+            
+            // 如果状态字符串需要映射，创建一个新的响应对象
+            val finalStatus = if (mappedState != latestState.uppercase()) {
+                DeviceStatusResponse(
+                    type = latestStatus.type,
+                    state = mappedState,
+                    stateAsString = mappedState
+                )
+            } else {
+                latestStatus
+            }
+            
+            // 更新缓存
+            lastKnownStatus[deviceID] = finalStatus
+            
+            finalStatus
         } catch (e: kotlinx.serialization.SerializationException) {
-            // 处理服务器返回空数组 [] 的情况
-            Log.w(TAG, "获取设备状态：服务器返回了非对象格式（可能是空数组 []），返回默认状态: deviceID=$deviceID")
-            // 返回一个默认的成功状态，允许系统继续运行
-            DeviceStatusResponse(deviceID = deviceID, status = "UNKNOWN", error = null)
+            Log.e(TAG, "获取设备状态：JSON 反序列化失败: deviceID=$deviceID", e)
+            // 记录原始错误信息用于排查
+            Log.w(TAG, "设备状态查询失败（JSON 解析错误），返回缓存或 UNKNOWN（容错处理）")
+            // 返回缓存或 UNKNOWN
+            val cachedStatus = lastKnownStatus[deviceID]
+            if (cachedStatus != null) {
+                Log.d(TAG, "返回缓存状态: ${cachedStatus.actualState}")
+                return cachedStatus
+            } else {
+                val unknownStatus = DeviceStatusResponse(
+                    type = null,
+                    state = "UNKNOWN",
+                    stateAsString = "Unknown"
+                )
+                lastKnownStatus[deviceID] = unknownStatus
+                return unknownStatus
+            }
         } catch (e: Exception) {
             Log.e(TAG, "获取设备状态异常: deviceID=$deviceID", e)
-            // 即使状态查询失败，也返回一个默认状态，不阻塞支付流程
-            Log.w(TAG, "设备状态查询失败，但允许继续操作（容错处理）")
-            DeviceStatusResponse(deviceID = deviceID, status = "UNKNOWN", error = null)
+            // 即使状态查询失败，也返回缓存或 UNKNOWN，不阻塞支付流程
+            Log.w(TAG, "设备状态查询失败，返回缓存或 UNKNOWN（容错处理）")
+            // 返回缓存或 UNKNOWN
+            val cachedStatus = lastKnownStatus[deviceID]
+            if (cachedStatus != null) {
+                Log.d(TAG, "返回缓存状态: ${cachedStatus.actualState}")
+                return cachedStatus
+            } else {
+                val unknownStatus = DeviceStatusResponse(
+                    type = null,
+                    state = "UNKNOWN",
+                    stateAsString = "Unknown"
+                )
+                lastKnownStatus[deviceID] = unknownStatus
+                return unknownStatus
+            }
         }
     }
     
     /**
      * 断开设备连接
+     * 注意：服务器返回 text/plain 纯文本，response.isSuccessful 即认为成功
      */
     suspend fun disconnectDevice(deviceID: String): Boolean {
         return try {
             Log.d(TAG, "断开设备连接: deviceID=$deviceID")
             val response = api.disconnectDevice(deviceID)
-            if (response.success) {
-                Log.d(TAG, "设备断开成功")
-                // 清除 deviceID
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "DisconnectDevice 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            if (response.isSuccessful) {
+                Log.d(TAG, "设备断开成功: deviceID=$deviceID, body=$bodyText")
+                // 清除 deviceID 和状态缓存
                 if (deviceID == _billAcceptorDeviceID.value) {
                     _billAcceptorDeviceID.value = null
                 }
                 if (deviceID == _coinAcceptorDeviceID.value) {
                     _coinAcceptorDeviceID.value = null
                 }
+                lastKnownStatus.remove(deviceID)  // 清除状态缓存
                 true
             } else {
-                Log.e(TAG, "设备断开失败: ${response.error}")
+                Log.e(TAG, "设备断开失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
                 false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "断开设备连接异常", e)
+            Log.e(TAG, "断开设备连接异常: deviceID=$deviceID", e)
             false
         }
     }

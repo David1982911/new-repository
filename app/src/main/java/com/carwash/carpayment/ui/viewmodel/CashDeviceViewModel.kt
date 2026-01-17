@@ -141,14 +141,16 @@ class CashDeviceViewModel(application: Application) : AndroidViewModel(applicati
                 // 轮询纸币器状态
                 if (billDeviceID != null) {
                     val status = repository.getDeviceStatus(billDeviceID)
-                    Log.d(TAG, "纸币器状态: $status")
+                    val state = status.actualState ?: "UNKNOWN"  // 使用 UNKNOWN 兜底
+                    Log.d(TAG, "纸币器状态: $state")
                     // TODO: 解析状态中的收款信息，更新 _totalAmount
                 }
                 
                 // 轮询硬币器状态
                 if (coinDeviceID != null) {
                     val status = repository.getDeviceStatus(coinDeviceID)
-                    Log.d(TAG, "硬币器状态: $status")
+                    val state = status.actualState ?: "UNKNOWN"  // 使用 UNKNOWN 兜底
+                    Log.d(TAG, "硬币器状态: $state")
                     // TODO: 解析状态中的收款信息，更新 _totalAmount
                 }
             } catch (e: Exception) {

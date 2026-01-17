@@ -275,7 +275,7 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
             while (true) {
                 try {
                     val status = repository.getDeviceStatus(deviceID)
-                    val statusStr = status?.status ?: "unknown"
+                    val statusStr = status.actualState ?: "UNKNOWN"
                     
                     // 如果状态发生变化，记录事件
                     if (statusStr != lastStatus && lastStatus != null) {
@@ -318,7 +318,7 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
             while (true) {
                 try {
                     val status = repository.getDeviceStatus(deviceID)
-                    val statusStr = status?.status ?: "unknown"
+                    val statusStr = status.actualState ?: "UNKNOWN"
                     
                     // 如果状态发生变化，记录事件
                     if (statusStr != lastStatus && lastStatus != null) {

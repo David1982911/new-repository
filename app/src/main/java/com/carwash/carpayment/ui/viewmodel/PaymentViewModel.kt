@@ -244,7 +244,8 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         val billStatusStart = System.currentTimeMillis()
                         val billStatus = cashDeviceRepository.getDeviceStatus(billDeviceID)
                         val billStatusDuration = System.currentTimeMillis() - billStatusStart
-                        Log.d(TAG, "现金支付：纸币器状态=${billStatus?.status}（查询耗时${billStatusDuration}ms）")
+                        val billState = billStatus.actualState ?: "UNKNOWN"  // 使用 UNKNOWN 兜底
+                        Log.d(TAG, "现金支付：纸币器状态=$billState（查询耗时${billStatusDuration}ms）")
                         // TODO: 解析状态中的收款金额
                         // 实际应该：val billAmount = parseAmountFromStatus(billStatus)
                         // collectedAmount += billAmount
@@ -254,7 +255,8 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         val coinStatusStart = System.currentTimeMillis()
                         val coinStatus = cashDeviceRepository.getDeviceStatus(coinDeviceID)
                         val coinStatusDuration = System.currentTimeMillis() - coinStatusStart
-                        Log.d(TAG, "现金支付：硬币器状态=${coinStatus?.status}（查询耗时${coinStatusDuration}ms）")
+                        val coinState = coinStatus.actualState ?: "UNKNOWN"  // 使用 UNKNOWN 兜底
+                        Log.d(TAG, "现金支付：硬币器状态=$coinState（查询耗时${coinStatusDuration}ms）")
                         // TODO: 解析状态中的收款金额
                         // 实际应该：val coinAmount = parseAmountFromStatus(coinStatus)
                         // collectedAmount += coinAmount
