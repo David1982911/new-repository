@@ -8,12 +8,20 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.TextField
+import androidx.compose.ui.text.input.KeyboardType
+import com.carwash.carpayment.AppBuildMark
+import com.carwash.carpayment.data.cashdevice.LevelEntry
 import com.carwash.carpayment.ui.theme.KioskButtonSizes
 import com.carwash.carpayment.ui.viewmodel.CashDeviceTestViewModel
 
@@ -46,6 +54,15 @@ fun DeviceTestScreen(
             style = MaterialTheme.typography.displaySmall,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        
+        // Build 标记（用于确认设备上运行的是否是最新 APK）
+        Text(
+            text = AppBuildMark.BUILD_MARK,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
             modifier = Modifier.padding(bottom = 16.dp)
         )
         
@@ -57,10 +74,20 @@ fun DeviceTestScreen(
             isEnabled = billState.isEnabled,
             eventCount = billState.eventCount,
             lastEvent = billState.lastEvent,
+            lastStatus = billState.lastStatus,
+            sessionAmountCents = billState.sessionAmountCents,
+            sessionAmount = billState.sessionAmount,
+            totalAmountCents = billState.totalAmountCents,
+            totalAmount = billState.totalAmount,
+            levels = billState.levels,
+            isPayoutEnabled = billState.isPayoutEnabled,
             onConnect = { viewModel.connectBillAcceptor() },
             onDisconnect = { viewModel.disconnectBillAcceptor() },
             onEnable = { viewModel.enableBillAcceptor() },
-            onDisable = { viewModel.disableBillAcceptor() }
+            onDisable = { viewModel.disableBillAcceptor() },
+            onEnablePayout = { viewModel.enablePayoutBill() },
+            onDisablePayout = { viewModel.disablePayoutBill() },
+            onDispense = { valueCents -> viewModel.dispenseBill(valueCents) }
         )
         
         // 硬币器测试区域
@@ -71,11 +98,36 @@ fun DeviceTestScreen(
             isEnabled = coinState.isEnabled,
             eventCount = coinState.eventCount,
             lastEvent = coinState.lastEvent,
+            lastStatus = coinState.lastStatus,
+            sessionAmountCents = coinState.sessionAmountCents,
+            sessionAmount = coinState.sessionAmount,
+            totalAmountCents = coinState.totalAmountCents,
+            totalAmount = coinState.totalAmount,
+            levels = coinState.levels,
+            isPayoutEnabled = coinState.isPayoutEnabled,
             onConnect = { viewModel.connectCoinAcceptor() },
             onDisconnect = { viewModel.disconnectCoinAcceptor() },
             onEnable = { viewModel.enableCoinAcceptor() },
-            onDisable = { viewModel.disableCoinAcceptor() }
+            onDisable = { viewModel.disableCoinAcceptor() },
+            onEnablePayout = { viewModel.enablePayoutCoin() },
+            onDisablePayout = { viewModel.disablePayoutCoin() },
+            onDispense = { valueCents -> viewModel.dispenseCoin(valueCents) }
         )
+        
+        // 开始新会话按钮
+        Button(
+            onClick = { viewModel.startNewSession() },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.tertiary
+            )
+        ) {
+            Text(
+                text = "开始新会话（清零本次投入金额）",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        }
         
         // 测试日志区域
         Card(
@@ -144,11 +196,22 @@ private fun DeviceTestCard(
     isEnabled: Boolean,
     eventCount: Int,
     lastEvent: String?,
+    lastStatus: String?,
+    sessionAmountCents: Int,
+    sessionAmount: Double,
+    totalAmountCents: Int,
+    totalAmount: Double,
+    levels: List<LevelEntry>,
+    isPayoutEnabled: Boolean,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onEnable: () -> Unit,
-    onDisable: () -> Unit
+    onDisable: () -> Unit,
+    onEnablePayout: () -> Unit,
+    onDisablePayout: () -> Unit,
+    onDispense: (Int) -> Unit
 ) {
+    var dispenseAmountText by remember { mutableStateOf("") }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -221,6 +284,15 @@ private fun DeviceTestCard(
                 }
             }
             
+            // 设备状态
+            if (lastStatus != null) {
+                Text(
+                    text = "状态: $lastStatus",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            
             // 最后事件
             if (lastEvent != null) {
                 Text(
@@ -228,6 +300,182 @@ private fun DeviceTestCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary
                 )
+            }
+            
+            HorizontalDivider()
+            
+            // 实时金额显示（本次投入金额 sessionDelta + 设备总库存金额 total）
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "实时金额",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "本次投入: ${String.format("%.2f", sessionAmount)} € (${sessionAmountCents} 分)",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "设备总库存: ${String.format("%.2f", totalAmount)} € (${totalAmountCents} 分)",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+            
+            // 库存明细（按面额列表展示 Value + Stored）
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "库存明细",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (levels.isEmpty()) {
+                        Text(
+                            text = "无库存数据",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        levels.forEach { level ->
+                            val amount = level.value * level.stored / 100.0
+                            Text(
+                                text = "面额 ${level.value} 分: ${level.stored} 张/枚 (${String.format("%.2f", amount)} €)${if (level.countryCode != null) " [${level.countryCode}]" else ""}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        // 如果是纸币器，显示钞箱提示
+                        if (title.contains("纸币器")) {
+                            Text(
+                                text = "注意：当前 API 未区分钞箱（主钞箱/循环钞箱），仅显示总库存",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+            
+            // 找零功能区
+            if (isConnected) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "找零功能",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        
+                        // 启用/禁用找零按钮
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = if (isPayoutEnabled) onDisablePayout else onEnablePayout,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isPayoutEnabled)
+                                        MaterialTheme.colorScheme.error
+                                    else
+                                        MaterialTheme.colorScheme.primary
+                                )
+                            ) {
+                                Text(if (isPayoutEnabled) "禁用找零" else "启用找零")
+                            }
+                        }
+                        
+                        // 找零状态
+                        Text(
+                            text = "找零状态: ${if (isPayoutEnabled) "已启用" else "已禁用"}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        
+                        // 测试找零输入框
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextField(
+                                value = dispenseAmountText,
+                                onValueChange = { 
+                                    // 只允许输入数字
+                                    if (it.all { it.isDigit() }) {
+                                        dispenseAmountText = it
+                                    }
+                                },
+                                label = { Text("找零金额（分）") },
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true
+                            )
+                            Button(
+                                onClick = {
+                                    val amount = dispenseAmountText.toIntOrNull()
+                                    if (amount != null && amount > 0) {
+                                        onDispense(amount)
+                                        dispenseAmountText = ""
+                                    }
+                                },
+                                enabled = dispenseAmountText.toIntOrNull() != null && dispenseAmountText.toIntOrNull()!! > 0
+                            ) {
+                                Text("测试找零")
+                            }
+                        }
+                        
+                        // 快捷找零按钮（1€/2€/5€）
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { onDispense(100) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("1€")
+                            }
+                            Button(
+                                onClick = { onDispense(200) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("2€")
+                            }
+                            Button(
+                                onClick = { onDispense(500) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("5€")
+                            }
+                        }
+                    }
+                }
             }
             
             // 按钮组

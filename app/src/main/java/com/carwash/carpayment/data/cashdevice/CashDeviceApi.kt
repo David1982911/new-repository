@@ -108,6 +108,73 @@ interface CashDeviceApi {
     suspend fun disconnectDevice(
         @Query("deviceID") deviceID: String
     ): Response<ResponseBody>
+    
+    /**
+     * 获取计数器（收款金额统计）
+     * GET /CashDevice/GetCounters?deviceID={deviceID}
+     * Authorization 头由 Interceptor 自动添加
+     * 用于获取当前已收金额（从 SSP 事件解析面额）
+     */
+    @GET("CashDevice/GetCounters")
+    suspend fun getCounters(
+        @Query("deviceID") deviceID: String
+    ): CountersResponse
+    
+    /**
+     * 获取所有面额库存（各面额的 Stored 数量）
+     * GET /CashDevice/GetAllLevels?deviceID={deviceID}
+     * Authorization 头由 Interceptor 自动添加
+     * 用于获取当前设备各面额的库存（Value 和 Stored），用于计算会话累计金额
+     */
+    @GET("CashDevice/GetAllLevels")
+    suspend fun getAllLevels(
+        @Query("deviceID") deviceID: String
+    ): LevelsResponse
+    
+    /**
+     * 找零（按金额）
+     * POST /CashDevice/DispenseValue?deviceID={deviceID}
+     * Authorization 头由 Interceptor 自动添加
+     * 用于发起找零请求（硬币器/纸币器吐出指定金额）
+     */
+    @POST("CashDevice/DispenseValue")
+    @Headers("Content-Type: application/json")
+    suspend fun dispenseValue(
+        @Query("deviceID") deviceID: String,
+        @Body request: DispenseValueRequest
+    ): Response<ResponseBody>
+    
+    /**
+     * 启用找零
+     * POST /CashDevice/EnablePayout?deviceID={deviceID}
+     * Authorization 头由 Interceptor 自动添加
+     * 用于启用设备的找零功能
+     */
+    @POST("CashDevice/EnablePayout")
+    suspend fun enablePayout(
+        @Query("deviceID") deviceID: String
+    ): Response<ResponseBody>
+    
+    /**
+     * 禁用找零
+     * POST /CashDevice/DisablePayout?deviceID={deviceID}
+     * Authorization 头由 Interceptor 自动添加
+     * 用于禁用设备的找零功能
+     */
+    @POST("CashDevice/DisablePayout")
+    suspend fun disablePayout(
+        @Query("deviceID") deviceID: String
+    ): Response<ResponseBody>
+    
+    /**
+     * 获取存储值（当前设备累计金额）- 已废弃，服务端返回 404
+     * @deprecated 请使用 getAllLevels（基于库存差值计算金额）
+     */
+    @Deprecated("GetStoredValue 返回 404，请使用 getAllLevels", ReplaceWith("getAllLevels(deviceID)"))
+    @GET("CashDevice/GetStoredValue")
+    suspend fun getStoredValue(
+        @Query("deviceID") deviceID: String
+    ): StoredValueResponse
 }
 
 /**
@@ -244,4 +311,105 @@ data class DeviceStatusResponse(
      */
     val actualType: String?
         get() = type
+}
+
+/**
+ * 计数器响应（收款金额统计）
+ * 从 GetCounters API 返回的金额信息
+ */
+@Serializable
+data class CountersResponse(
+    val deviceID: String? = null,
+    val stackedTotalCents: Int = 0,  // 已收总金额（分）
+    val stackedTotal: Double = 0.0,  // 已收总金额（元，可选字段）
+    val stackedCounts: Map<String, Int>? = null,  // 各面额数量（可选）
+    val error: String? = null
+) {
+    /**
+     * 获取已收总金额（元）
+     */
+    val totalAmount: Double
+        get() = stackedTotal.takeIf { it > 0 } ?: (stackedTotalCents / 100.0)
+}
+
+/**
+ * 面额库存信息（单个面额）
+ * GetAllLevels 响应中的单个条目
+ * 注意：Value 对硬币可能是 1/2/5…（分），对纸币是 500/1000…（分），要统一解释单位
+ */
+@Serializable
+data class LevelEntry(
+    @SerialName("Value") val value: Int,  // 面额（分），如 500 表示 5€，1 表示 1分硬币
+    @SerialName("Stored") val stored: Int,  // 该面额的库存数量（张/枚）
+    @SerialName("CountryCode") val countryCode: String? = null  // 货币代码（如 "EUR"）
+)
+
+/**
+ * 库存响应（所有面额的库存）
+ * 从 GetAllLevels API 返回的库存信息
+ * 服务器结构：{ "Levels": [...], "Success": true, "Message": "..." }
+ * 用于计算会话累计金额：delta = Σ(value * (stored_now - stored_baseline))
+ */
+@Serializable
+data class LevelsResponse(
+    val deviceID: String? = null,
+    @SerialName("Levels") val levels: List<LevelEntry>? = null,  // 所有面额的库存列表（注意：服务器返回的是 "Levels"，不是 "AllLevels"）
+    @SerialName("Success") val success: Boolean? = null,  // 是否成功
+    @SerialName("Message") val message: String? = null,  // 消息（可选）
+    val error: String? = null  // 错误信息（如果解析失败）
+) {
+    /**
+     * 获取所有面额库存列表（兼容字段名）
+     */
+    val allLevels: List<LevelEntry>?
+        get() = levels
+    
+    /**
+     * 计算总金额（分）- 所有面额的 value * stored 总和
+     * 注意：Value 对硬币可能是 1/2/5…，对纸币是 500/1000…，要统一解释单位（分）
+     */
+    fun calculateTotalCents(): Int {
+        return levels?.sumOf { it.value * it.stored } ?: 0
+    }
+    
+    /**
+     * 计算总金额（元）
+     */
+    fun calculateTotalAmount(): Double {
+        return calculateTotalCents() / 100.0
+    }
+}
+
+/**
+ * 找零请求
+ */
+@Serializable
+data class DispenseValueRequest(
+    @SerialName("Value") val value: Int,  // 找零金额（分），如 200 表示 2€
+    @SerialName("CountryCode") val countryCode: String = "EUR"  // 货币代码，默认 EUR
+)
+
+/**
+ * 存储值响应（当前设备累计金额）- 已废弃，服务端返回 404
+ * @deprecated 请使用 LevelsResponse（基于 GetAllLevels 和库存差值）
+ */
+@Deprecated("GetStoredValue 返回 404，请使用 LevelsResponse", ReplaceWith("LevelsResponse"))
+@Serializable
+data class StoredValueResponse(
+    val deviceID: String? = null,
+    @SerialName("Value") val value: Int = 0,  // 当前存储金额（分）
+    @SerialName("ValueCents") val valueCents: Int = 0,  // 当前存储金额（分，可选字段）
+    val error: String? = null
+) {
+    /**
+     * 获取存储金额（分）- 优先使用 value，其次 valueCents
+     */
+    val storedCents: Int
+        get() = value.takeIf { it > 0 } ?: valueCents
+    
+    /**
+     * 获取存储金额（元）
+     */
+    val storedAmount: Double
+        get() = storedCents / 100.0
 }

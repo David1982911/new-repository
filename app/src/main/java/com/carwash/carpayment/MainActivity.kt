@@ -31,11 +31,15 @@ class MainActivity : ComponentActivity() {
     
     companion object {
         private const val TAG = "MainActivity"
+        private const val BUILD_MARK_TAG = "AppBuildMark"
     }
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "MainActivity onCreate - 启动应用")
+        
+        // 打印 Build 标记（用于确认设备上运行的是否是最新 APK）
+        Log.d(BUILD_MARK_TAG, AppBuildMark.getFullMark())
         
         enableEdgeToEdge()
         setContent {

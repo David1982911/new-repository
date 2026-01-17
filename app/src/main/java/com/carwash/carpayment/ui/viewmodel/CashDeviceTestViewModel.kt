@@ -37,7 +37,13 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         val isEnabled: Boolean = false,
         val eventCount: Int = 0,
         val lastEvent: String? = null,
-        val lastStatus: String? = null
+        val lastStatus: String? = null,
+        val sessionAmountCents: Int = 0,  // 本次会话累计金额（分）- sessionDeltaCents
+        val sessionAmount: Double = 0.0,  // 本次会话累计金额（元）
+        val totalAmountCents: Int = 0,    // 设备总库存金额（分）- currentTotalCents
+        val totalAmount: Double = 0.0,    // 设备总库存金额（元）
+        val levels: List<com.carwash.carpayment.data.cashdevice.LevelEntry> = emptyList(),  // 库存明细
+        val isPayoutEnabled: Boolean = false  // 是否启用找零
     )
     
     private val _billAcceptorState = MutableStateFlow(DeviceState())
@@ -266,7 +272,7 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     }
     
     /**
-     * 开始轮询纸币器状态
+     * 开始轮询纸币器状态和金额
      */
     private fun startBillPolling(deviceID: String) {
         stopBillPolling()
@@ -274,8 +280,18 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
             var lastStatus: String? = null
             while (true) {
                 try {
+                    // 轮询状态
                     val status = repository.getDeviceStatus(deviceID)
                     val statusStr = status.actualState ?: "UNKNOWN"
+                    
+                    // 轮询库存（金额）
+                    val levelsResponse = repository.pollLevels(deviceID)
+                    val tracker = repository.getAmountTracker()
+                    val sessionCents = tracker.getDeviceSessionCents(deviceID)
+                    val sessionAmount = sessionCents / 100.0
+                    val totalCents = tracker.getDeviceCurrentCents(deviceID)
+                    val totalAmount = totalCents / 100.0
+                    val levels = levelsResponse.levels ?: emptyList()
                     
                     // 如果状态发生变化，记录事件
                     if (statusStr != lastStatus && lastStatus != null) {
@@ -283,14 +299,26 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                         _billAcceptorState.value = currentState.copy(
                             eventCount = currentState.eventCount + 1,
                             lastEvent = "状态变化: $lastStatus -> $statusStr",
-                            lastStatus = statusStr
+                            lastStatus = statusStr,
+                            sessionAmountCents = sessionCents,
+                            sessionAmount = sessionAmount,
+                            totalAmountCents = totalCents,
+                            totalAmount = totalAmount,
+                            levels = levels
                         )
                         addLog("纸币器事件: $lastStatus -> $statusStr")
                         Log.d(TAG, "纸币器状态变化: $lastStatus -> $statusStr")
                     }
                     
                     lastStatus = statusStr
-                    _billAcceptorState.value = _billAcceptorState.value.copy(lastStatus = statusStr)
+                    _billAcceptorState.value = _billAcceptorState.value.copy(
+                        lastStatus = statusStr,
+                        sessionAmountCents = sessionCents,
+                        sessionAmount = sessionAmount,
+                        totalAmountCents = totalCents,
+                        totalAmount = totalAmount,
+                        levels = levels
+                    )
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "轮询纸币器状态异常", e)
@@ -309,7 +337,7 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     }
     
     /**
-     * 开始轮询硬币器状态
+     * 开始轮询硬币器状态和金额
      */
     private fun startCoinPolling(deviceID: String) {
         stopCoinPolling()
@@ -317,8 +345,18 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
             var lastStatus: String? = null
             while (true) {
                 try {
+                    // 轮询状态
                     val status = repository.getDeviceStatus(deviceID)
                     val statusStr = status.actualState ?: "UNKNOWN"
+                    
+                    // 轮询库存（金额）
+                    val levelsResponse = repository.pollLevels(deviceID)
+                    val tracker = repository.getAmountTracker()
+                    val sessionCents = tracker.getDeviceSessionCents(deviceID)
+                    val sessionAmount = sessionCents / 100.0
+                    val totalCents = tracker.getDeviceCurrentCents(deviceID)
+                    val totalAmount = totalCents / 100.0
+                    val levels = levelsResponse.levels ?: emptyList()
                     
                     // 如果状态发生变化，记录事件
                     if (statusStr != lastStatus && lastStatus != null) {
@@ -326,14 +364,26 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                         _coinAcceptorState.value = currentState.copy(
                             eventCount = currentState.eventCount + 1,
                             lastEvent = "状态变化: $lastStatus -> $statusStr",
-                            lastStatus = statusStr
+                            lastStatus = statusStr,
+                            sessionAmountCents = sessionCents,
+                            sessionAmount = sessionAmount,
+                            totalAmountCents = totalCents,
+                            totalAmount = totalAmount,
+                            levels = levels
                         )
                         addLog("硬币器事件: $lastStatus -> $statusStr")
                         Log.d(TAG, "硬币器状态变化: $lastStatus -> $statusStr")
                     }
                     
                     lastStatus = statusStr
-                    _coinAcceptorState.value = _coinAcceptorState.value.copy(lastStatus = statusStr)
+                    _coinAcceptorState.value = _coinAcceptorState.value.copy(
+                        lastStatus = statusStr,
+                        sessionAmountCents = sessionCents,
+                        sessionAmount = sessionAmount,
+                        totalAmountCents = totalCents,
+                        totalAmount = totalAmount,
+                        levels = levels
+                    )
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "轮询硬币器状态异常", e)
@@ -349,6 +399,213 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     private fun stopCoinPolling() {
         coinPollingJob?.cancel()
         coinPollingJob = null
+    }
+    
+    /**
+     * 开始新会话（重置金额跟踪器，重新采集基线）
+     */
+    fun startNewSession() {
+        viewModelScope.launch {
+            try {
+                addLog("开始新会话：重置金额跟踪器")
+                repository.getAmountTracker().reset()
+                
+                // 重新采集基线（如果设备已连接）
+                val billDeviceID = repository.billAcceptorDeviceID.value
+                val coinDeviceID = repository.coinAcceptorDeviceID.value
+                
+                if (billDeviceID != null) {
+                    try {
+                        val levelsResponse = repository.readCurrentLevels(billDeviceID)
+                        val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
+                        repository.getAmountTracker().setBaseline(billDeviceID, levels)
+                        addLog("纸币器基线已重置")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "重置纸币器基线失败", e)
+                        addLog("重置纸币器基线失败: ${e.message}")
+                    }
+                }
+                
+                if (coinDeviceID != null) {
+                    try {
+                        val levelsResponse = repository.readCurrentLevels(coinDeviceID)
+                        val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
+                        repository.getAmountTracker().setBaseline(coinDeviceID, levels)
+                        addLog("硬币器基线已重置")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "重置硬币器基线失败", e)
+                        addLog("重置硬币器基线失败: ${e.message}")
+                    }
+                }
+                
+                addLog("新会话已开始")
+            } catch (e: Exception) {
+                Log.e(TAG, "开始新会话异常", e)
+                addLog("开始新会话异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 找零（纸币器）
+     * @param valueCents 找零金额（分），如 200 表示 2€
+     */
+    fun dispenseBill(valueCents: Int) {
+        viewModelScope.launch {
+            val deviceID = repository.billAcceptorDeviceID.value
+            if (deviceID == null) {
+                addLog("纸币器未连接，无法找零")
+                return@launch
+            }
+            
+            try {
+                addLog("纸币器找零: ${valueCents}分 (${valueCents / 100.0}元)")
+                val success = repository.dispenseValue(deviceID, valueCents, "EUR")
+                if (success) {
+                    addLog("纸币器找零成功: ${valueCents}分")
+                } else {
+                    addLog("纸币器找零失败: ${valueCents}分")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "纸币器找零异常", e)
+                addLog("纸币器找零异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 找零（硬币器）
+     * @param valueCents 找零金额（分），如 200 表示 2€
+     */
+    fun dispenseCoin(valueCents: Int) {
+        viewModelScope.launch {
+            val deviceID = repository.coinAcceptorDeviceID.value
+            if (deviceID == null) {
+                addLog("硬币器未连接，无法找零")
+                return@launch
+            }
+            
+            try {
+                addLog("硬币器找零: ${valueCents}分 (${valueCents / 100.0}元)")
+                val success = repository.dispenseValue(deviceID, valueCents, "EUR")
+                if (success) {
+                    addLog("硬币器找零成功: ${valueCents}分")
+                } else {
+                    addLog("硬币器找零失败: ${valueCents}分")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "硬币器找零异常", e)
+                addLog("硬币器找零异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 启用找零（纸币器）
+     */
+    fun enablePayoutBill() {
+        viewModelScope.launch {
+            val deviceID = repository.billAcceptorDeviceID.value
+            if (deviceID == null) {
+                addLog("纸币器未连接，无法启用找零")
+                return@launch
+            }
+            
+            try {
+                addLog("启用纸币器找零...")
+                val success = repository.enablePayout(deviceID)
+                if (success) {
+                    addLog("纸币器找零已启用")
+                    _billAcceptorState.value = _billAcceptorState.value.copy(isPayoutEnabled = true)
+                } else {
+                    addLog("纸币器找零启用失败")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "启用纸币器找零异常", e)
+                addLog("启用纸币器找零异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 禁用找零（纸币器）
+     */
+    fun disablePayoutBill() {
+        viewModelScope.launch {
+            val deviceID = repository.billAcceptorDeviceID.value
+            if (deviceID == null) {
+                addLog("纸币器未连接，无法禁用找零")
+                return@launch
+            }
+            
+            try {
+                addLog("禁用纸币器找零...")
+                val success = repository.disablePayout(deviceID)
+                if (success) {
+                    addLog("纸币器找零已禁用")
+                    _billAcceptorState.value = _billAcceptorState.value.copy(isPayoutEnabled = false)
+                } else {
+                    addLog("纸币器找零禁用失败")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "禁用纸币器找零异常", e)
+                addLog("禁用纸币器找零异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 启用找零（硬币器）
+     */
+    fun enablePayoutCoin() {
+        viewModelScope.launch {
+            val deviceID = repository.coinAcceptorDeviceID.value
+            if (deviceID == null) {
+                addLog("硬币器未连接，无法启用找零")
+                return@launch
+            }
+            
+            try {
+                addLog("启用硬币器找零...")
+                val success = repository.enablePayout(deviceID)
+                if (success) {
+                    addLog("硬币器找零已启用")
+                    _coinAcceptorState.value = _coinAcceptorState.value.copy(isPayoutEnabled = true)
+                } else {
+                    addLog("硬币器找零启用失败")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "启用硬币器找零异常", e)
+                addLog("启用硬币器找零异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 禁用找零（硬币器）
+     */
+    fun disablePayoutCoin() {
+        viewModelScope.launch {
+            val deviceID = repository.coinAcceptorDeviceID.value
+            if (deviceID == null) {
+                addLog("硬币器未连接，无法禁用找零")
+                return@launch
+            }
+            
+            try {
+                addLog("禁用硬币器找零...")
+                val success = repository.disablePayout(deviceID)
+                if (success) {
+                    addLog("硬币器找零已禁用")
+                    _coinAcceptorState.value = _coinAcceptorState.value.copy(isPayoutEnabled = false)
+                } else {
+                    addLog("硬币器找零禁用失败")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "禁用硬币器找零异常", e)
+                addLog("禁用硬币器找零异常: ${e.message}")
+            }
+        }
     }
     
     /**

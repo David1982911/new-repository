@@ -11,11 +11,13 @@ import com.carwash.carpayment.data.cashdevice.CashDeviceRepository
 import com.carwash.carpayment.data.payment.PaymentFlowState
 import com.carwash.carpayment.data.payment.PaymentFlowStateMachine
 import com.carwash.carpayment.data.payment.PaymentFlowStatus
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -130,7 +132,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
     }
     
     /**
-     * 处理现金支付（真实实现）
+     * 处理现金支付（真实实现：使用 ITL Cash Device REST API）
      */
     private suspend fun processCashPayment(currentState: PaymentFlowState) {
         val program = currentState.selectedProgram
@@ -141,163 +143,144 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         }
         
         val targetAmount = program.price
+        val targetAmountCents = (targetAmount * 100).toInt()
         
-        // 打印现金设备服务配置信息
-        val baseUrl = CashDeviceClient.getBaseUrl(getApplication())
-        Log.d(TAG, "现金支付开始：目标金额=${targetAmount}€")
-        Log.d(TAG, "现金设备服务 baseUrl: $baseUrl")
-        Log.d(TAG, "认证接口完整URL: $baseUrl/Users/Authenticate")
+        Log.d(TAG, "现金支付开始：目标金额=${targetAmount}€ (${targetAmountCents}分)")
         
         try {
-            // 1. 认证
-            val authStartTime = System.currentTimeMillis()
-            Log.d(TAG, "现金支付：开始认证...")
-            val (authSuccess, authError) = cashDeviceRepository.authenticate()
-            val authDuration = System.currentTimeMillis() - authStartTime
-            if (!authSuccess) {
-                val errorMsg = authError ?: "现金设备认证失败"
-                Log.e(TAG, "现金支付：认证失败（耗时${authDuration}ms）: $errorMsg")
-                handlePaymentFailure(errorMsg)
-                return
-            }
-            Log.d(TAG, "现金支付：认证成功（耗时${authDuration}ms）")
-            
-            // 2. 创建探测 API（超时 12 秒，OpenConnection 需要等待设备响应）
-            val probeApi = CashDeviceClient.createWithTimeout(
-                context = getApplication(),
-                timeoutSeconds = 12L
-            )
-            Log.d(TAG, "现金支付：已创建探测 API（超时 12 秒）")
-            
-            // 3. 初始化纸币器和硬币器（内部会自动探测）
-            val initStartTime = System.currentTimeMillis()
-            Log.d(TAG, "现金支付：开始初始化设备（自动探测 Port ↔ SspAddress 映射）...")
-            
-            // 纸币器初始化（独立处理，失败不影响硬币器）
-            val billInitStartTime = System.currentTimeMillis()
-            val billInitSuccess = try {
-                cashDeviceRepository.initializeBillAcceptor(probeApi)
+            // 1. 启动现金设备会话（认证 + 打开双设备连接）
+            val sessionStartTime = System.currentTimeMillis()
+            Log.d(TAG, "现金支付：启动设备会话...")
+            val devices = try {
+                cashDeviceRepository.startCashSession()
             } catch (e: Exception) {
-                Log.e(TAG, "现金支付：纸币器初始化异常（不影响硬币器）", e)
-                false
-            }
-            val billInitDuration = System.currentTimeMillis() - billInitStartTime
-            if (billInitSuccess) {
-                Log.d(TAG, "现金支付：纸币器初始化成功（耗时${billInitDuration}ms）")
-            } else {
-                Log.w(TAG, "现金支付：纸币器初始化失败（耗时${billInitDuration}ms），继续尝试硬币器（设备独立处理）")
-            }
-            
-            // 硬币器初始化（独立处理，失败不影响纸币器）
-            val coinInitStartTime = System.currentTimeMillis()
-            val coinInitSuccess = try {
-                cashDeviceRepository.initializeCoinAcceptor(probeApi)
-            } catch (e: Exception) {
-                Log.e(TAG, "现金支付：硬币器初始化异常（不影响纸币器）", e)
-                false
-            }
-            val coinInitDuration = System.currentTimeMillis() - coinInitStartTime
-            if (coinInitSuccess) {
-                Log.d(TAG, "现金支付：硬币器初始化成功（耗时${coinInitDuration}ms）")
-            } else {
-                Log.w(TAG, "现金支付：硬币器初始化失败（耗时${coinInitDuration}ms），纸币器仍可使用（设备独立处理）")
-            }
-            
-            // 只有两个设备都连接失败时，才认为初始化失败
-            if (!billInitSuccess && !coinInitSuccess) {
-                Log.e(TAG, "现金支付：所有设备连接失败（纸币器和硬币器都无法连接）")
-                handlePaymentFailure("现金设备连接失败，请检查设备连接")
+                Log.e(TAG, "现金支付：启动设备会话失败", e)
+                handlePaymentFailure("设备连接失败: ${e.message}")
                 return
             }
             
-            val initDuration = System.currentTimeMillis() - initStartTime
-            val availableDevices = mutableListOf<String>()
-            if (billInitSuccess) availableDevices.add("纸币器")
-            if (coinInitSuccess) availableDevices.add("硬币器")
-            Log.d(TAG, "现金支付：设备初始化完成（总耗时${initDuration}ms），可用设备: ${availableDevices.joinToString("、")}")
+            if (devices.isEmpty()) {
+                Log.e(TAG, "现金支付：未找到可用设备")
+                handlePaymentFailure("未找到可用设备，请检查设备连接")
+                return
+            }
             
-            // 3. 等待收款（轮询设备状态，检测收款金额）
-            Log.d(TAG, "现金支付：开始等待收款，目标金额=${targetAmount}€")
+            val sessionDuration = System.currentTimeMillis() - sessionStartTime
+            Log.d(TAG, "现金支付：设备会话启动成功（耗时${sessionDuration}ms），已注册设备: ${devices.keys.joinToString("、")}")
+            
+            // 2. 轮询计数器，获取实时已收金额
+            Log.d(TAG, "现金支付：开始等待收款，目标金额=${targetAmount}€ (${targetAmountCents}分)")
             val paymentStartTime = System.currentTimeMillis()
-            var collectedAmount = 0.0
-            var lastStatusCheck = System.currentTimeMillis()
-            var consecutiveNoChangeCount = 0  // 连续无变化次数
+            val tracker = cashDeviceRepository.getAmountTracker()
             
-            while (collectedAmount < targetAmount) {
+            while (currentCoroutineContext().isActive && tracker.getTotalCents() < targetAmountCents) {
                 // 检查超时
                 val elapsed = System.currentTimeMillis() - paymentStartTime
                 if (elapsed > CASH_PAYMENT_TIMEOUT_MS) {
-                    Log.e(TAG, "现金支付：超时（${elapsed}ms），已收款=${collectedAmount}€，目标=${targetAmount}€")
-                    handlePaymentFailure("支付超时（${elapsed/1000}秒内未检测到收款），请重试")
-                    return
-                }
-                
-                // 每 500ms 检查一次设备状态
-                val timeSinceLastCheck = System.currentTimeMillis() - lastStatusCheck
-                if (timeSinceLastCheck >= 500) {
-                    val billDeviceID = cashDeviceRepository.billAcceptorDeviceID.value
-                    val coinDeviceID = cashDeviceRepository.coinAcceptorDeviceID.value
+                    val collectedCents = tracker.getTotalCents()
+                    val collectedAmount = tracker.getTotalAmount()
                     
-                    var statusChanged = false
+                    // 超时日志：打印 baselineTotal / currentTotal / sessionDelta / levels条目数
+                    val billDeviceID = devices["SPECTRAL_PAYOUT-0"]
+                    val coinDeviceID = devices["SMART_COIN_SYSTEM-1"]
+                    var totalLevelsCount = 0
+                    var billBaselineTotal = 0
+                    var billCurrentTotal = 0
+                    var billSessionDelta = 0
+                    var coinBaselineTotal = 0
+                    var coinCurrentTotal = 0
+                    var coinSessionDelta = 0
                     
                     if (billDeviceID != null) {
-                        val billStatusStart = System.currentTimeMillis()
-                        val billStatus = cashDeviceRepository.getDeviceStatus(billDeviceID)
-                        val billStatusDuration = System.currentTimeMillis() - billStatusStart
-                        val billState = billStatus.actualState ?: "UNKNOWN"  // 使用 UNKNOWN 兜底
-                        Log.d(TAG, "现金支付：纸币器状态=$billState（查询耗时${billStatusDuration}ms）")
-                        // TODO: 解析状态中的收款金额
-                        // 实际应该：val billAmount = parseAmountFromStatus(billStatus)
-                        // collectedAmount += billAmount
+                        billBaselineTotal = tracker.getDeviceBaselineCents(billDeviceID)
+                        billCurrentTotal = tracker.getDeviceCurrentCents(billDeviceID)
+                        billSessionDelta = tracker.getDeviceSessionCents(billDeviceID)
+                        val billLevels = tracker.getDeviceCurrentLevels(billDeviceID)
+                        totalLevelsCount += billLevels.size
                     }
                     
                     if (coinDeviceID != null) {
-                        val coinStatusStart = System.currentTimeMillis()
-                        val coinStatus = cashDeviceRepository.getDeviceStatus(coinDeviceID)
-                        val coinStatusDuration = System.currentTimeMillis() - coinStatusStart
-                        val coinState = coinStatus.actualState ?: "UNKNOWN"  // 使用 UNKNOWN 兜底
-                        Log.d(TAG, "现金支付：硬币器状态=$coinState（查询耗时${coinStatusDuration}ms）")
-                        // TODO: 解析状态中的收款金额
-                        // 实际应该：val coinAmount = parseAmountFromStatus(coinStatus)
-                        // collectedAmount += coinAmount
+                        coinBaselineTotal = tracker.getDeviceBaselineCents(coinDeviceID)
+                        coinCurrentTotal = tracker.getDeviceCurrentCents(coinDeviceID)
+                        coinSessionDelta = tracker.getDeviceSessionCents(coinDeviceID)
+                        val coinLevels = tracker.getDeviceCurrentLevels(coinDeviceID)
+                        totalLevelsCount += coinLevels.size
                     }
                     
-                    // 临时：由于没有真实的收款事件 API，这里先模拟收款完成
-                    // 实际应该从设备状态中解析收款金额
-                    // 为了测试连通性，这里先等待 2 秒后直接标记成功（模拟收款完成）
-                    if (elapsed >= 2000 && collectedAmount == 0.0) {
-                        Log.d(TAG, "现金支付：模拟收款完成（实际应从设备状态解析）")
-                        collectedAmount = targetAmount  // 临时：模拟收款达到目标金额
-                        statusChanged = true
-                    }
-                    
-                    if (!statusChanged) {
-                        consecutiveNoChangeCount++
-                        if (consecutiveNoChangeCount > 20) {  // 10秒无变化
-                            Log.w(TAG, "现金支付：长时间无状态变化，可能设备未响应")
-                        }
-                    } else {
-                        consecutiveNoChangeCount = 0
-                    }
-                    
-                    Log.d(TAG, "现金支付：等待收款中...（已等待${elapsed}ms，已收款=${collectedAmount}€）")
-                    lastStatusCheck = System.currentTimeMillis()
+                    Log.e(TAG, "现金支付：超时（${elapsed}ms），已收款=${collectedAmount}€ (${collectedCents}分)，目标=${targetAmount}€ (${targetAmountCents}分)")
+                    Log.e(TAG, "现金支付：超时详情 - 纸币器: baselineTotal=$billBaselineTotal, currentTotal=$billCurrentTotal, sessionDelta=$billSessionDelta; 硬币器: baselineTotal=$coinBaselineTotal, currentTotal=$coinCurrentTotal, sessionDelta=$coinSessionDelta; levels条目数=$totalLevelsCount")
+                    handlePaymentFailure("支付超时（${elapsed/1000}秒内未达到目标金额），请重试")
+                    return
                 }
                 
-                delay(100) // 短暂延迟，避免过度轮询
+                // 轮询所有设备的库存（基于库存差值计算本次会话累计金额）
+                for ((deviceName, deviceID) in devices) {
+                    try {
+                        val levelsResponse = cashDeviceRepository.pollLevels(deviceID)
+                        // amountTracker 已在 pollLevels 中更新
+                        // 如果读取失败（error != null），保留上一次成功值，不中断支付流程
+                    } catch (e: Exception) {
+                        Log.w(TAG, "现金支付：轮询库存异常: deviceName=$deviceName, deviceID=$deviceID", e)
+                        // 继续轮询其他设备，不中断支付流程
+                    }
+                }
+                
+                val currentTotalCents = tracker.getTotalCents()
+                val currentTotalAmount = tracker.getTotalAmount()
+                
+                // 超时逻辑保留，但日志里要打印：baselineTotal / currentTotal / sessionDelta / levels条目数
+                val billDeviceID = devices["SPECTRAL_PAYOUT-0"]
+                val coinDeviceID = devices["SMART_COIN_SYSTEM-1"]
+                var totalLevelsCount = 0
+                var billBaselineTotal = 0
+                var billCurrentTotal = 0
+                var billSessionDelta = 0
+                var coinBaselineTotal = 0
+                var coinCurrentTotal = 0
+                var coinSessionDelta = 0
+                
+                if (billDeviceID != null) {
+                    billBaselineTotal = tracker.getDeviceBaselineCents(billDeviceID)
+                    billCurrentTotal = tracker.getDeviceCurrentCents(billDeviceID)
+                    billSessionDelta = tracker.getDeviceSessionCents(billDeviceID)
+                    val billLevels = tracker.getDeviceCurrentLevels(billDeviceID)
+                    totalLevelsCount += billLevels.size
+                }
+                
+                if (coinDeviceID != null) {
+                    coinBaselineTotal = tracker.getDeviceBaselineCents(coinDeviceID)
+                    coinCurrentTotal = tracker.getDeviceCurrentCents(coinDeviceID)
+                    coinSessionDelta = tracker.getDeviceSessionCents(coinDeviceID)
+                    val coinLevels = tracker.getDeviceCurrentLevels(coinDeviceID)
+                    totalLevelsCount += coinLevels.size
+                }
+                
+                Log.d(TAG, "现金支付：等待收款中...（已等待${elapsed}ms，已收款=${currentTotalAmount}€ (${currentTotalCents}分)，目标=${targetAmount}€ (${targetAmountCents}分)）")
+                Log.d(TAG, "现金支付：金额详情 - 纸币器: baselineTotal=$billBaselineTotal, currentTotal=$billCurrentTotal, sessionDelta=$billSessionDelta; 硬币器: baselineTotal=$coinBaselineTotal, currentTotal=$coinCurrentTotal, sessionDelta=$coinSessionDelta; levels条目数=$totalLevelsCount")
+                
+                delay(500)  // 每 500ms 轮询一次（300~800ms 范围内）
             }
             
+            // 3. 收款完成
+            val collectedCents = tracker.getTotalCents()
+            val collectedAmount = tracker.getTotalAmount()
             val paymentDuration = System.currentTimeMillis() - paymentStartTime
-            Log.d(TAG, "现金支付：收款完成（耗时${paymentDuration}ms），已收款=${collectedAmount}€")
             
-            // 4. 支付成功
-            val successState = stateMachine.paymentSuccess(_flowState.value)
-            if (successState != null) {
-                _flowState.value = successState
-                Log.d(TAG, "现金支付处理完成，状态: SUCCESS")
+            if (collectedCents >= targetAmountCents) {
+                Log.d(TAG, "现金支付：收款完成（耗时${paymentDuration}ms），已收款=${collectedAmount}€ (${collectedCents}分)，目标=${targetAmount}€ (${targetAmountCents}分)")
+                
+                // 支付成功
+                val successState = stateMachine.paymentSuccess(_flowState.value)
+                if (successState != null) {
+                    _flowState.value = successState
+                    Log.d(TAG, "现金支付处理完成，状态: SUCCESS")
+                } else {
+                    Log.e(TAG, "现金支付：状态机转换失败（paymentSuccess 返回 null）")
+                    handlePaymentFailure("状态机转换失败")
+                }
             } else {
-                Log.e(TAG, "现金支付：无法标记为成功，当前状态=${_flowState.value.status}")
-                handlePaymentFailure("支付状态更新失败")
+                Log.e(TAG, "现金支付：收款未完成，已收款=${collectedAmount}€ (${collectedCents}分)，目标=${targetAmount}€ (${targetAmountCents}分)")
+                handlePaymentFailure("收款未完成")
             }
             
         } catch (e: Exception) {

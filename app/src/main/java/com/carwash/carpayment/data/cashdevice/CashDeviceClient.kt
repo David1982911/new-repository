@@ -6,6 +6,9 @@ import android.util.Log
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -31,6 +34,26 @@ object CashDeviceClient {
     }
     
     private val contentType = "application/json".toMediaType()
+    
+    /**
+     * Cookie 持久化（用于 Session 保活）
+     */
+    private val cookieJar = object : CookieJar {
+        private val store = HashMap<String, List<Cookie>>()
+        
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            store[url.host] = cookies
+            Log.d(TAG, "保存 Cookie: host=${url.host}, cookies=${cookies.size}")
+        }
+        
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val cookies = store[url.host] ?: emptyList()
+            if (cookies.isNotEmpty()) {
+                Log.d(TAG, "加载 Cookie: host=${url.host}, cookies=${cookies.size}")
+            }
+            return cookies
+        }
+    }
     
     /**
      * 获取配置的 baseUrl（从 SharedPreferences 或使用默认值）
@@ -79,6 +102,7 @@ object CashDeviceClient {
         val okHttpClient = OkHttpClient.Builder()
             .addInterceptor(authInterceptor)
             .addInterceptor(loggingInterceptor)
+            .cookieJar(cookieJar)  // 添加 Cookie 持久化
             .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
             .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
             .writeTimeout(timeoutSeconds, TimeUnit.SECONDS)
@@ -125,6 +149,7 @@ object CashDeviceClient {
         val okHttpClient = OkHttpClient.Builder()
             .addInterceptor(authInterceptor)  // 授权拦截器（先执行，处理 401）
             .addInterceptor(loggingInterceptor)  // 日志拦截器（后执行，记录最终请求）
+            .cookieJar(cookieJar)  // 添加 Cookie 持久化（Session 保活）
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)

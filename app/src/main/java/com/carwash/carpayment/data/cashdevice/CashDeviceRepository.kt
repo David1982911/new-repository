@@ -17,6 +17,10 @@ class CashDeviceRepository(
     private val baseUrl: String = "http://localhost:8080"  // TODO: 从配置读取
 ) {
     
+    // 会话管理器和金额跟踪器
+    private val sessionManager = CashSessionManager(api)
+    private val amountTracker = CashAmountTracker()
+    
     companion object {
         private const val TAG = "CashDeviceRepository"
         private const val DEFAULT_USERNAME = "admin"
@@ -485,6 +489,17 @@ class CashDeviceRepository(
                 _billAcceptorDeviceID.value = response.deviceID
                 Log.d(TAG, "纸币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}")
                 Log.d(TAG, "设备ID获取成功: OpenConnection响应返回的deviceID=${response.deviceID}")
+                
+                // 设置基线库存（OpenConnection 成功后）
+                try {
+                    val levelsResponse = readCurrentLevels(response.deviceID)
+                    val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
+                    amountTracker.setBaseline(response.deviceID, levels)
+                } catch (e: Exception) {
+                    Log.w(TAG, "纸币器：设置基线库存失败，继续使用空库存", e)
+                    amountTracker.setBaseline(response.deviceID, emptyMap())  // 使用空库存
+                }
+                
                 true
             } else {
                 Log.e(TAG, "纸币器连接失败: ${response.error}")
@@ -562,6 +577,17 @@ class CashDeviceRepository(
                 _coinAcceptorDeviceID.value = response.deviceID
                 Log.d(TAG, "硬币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}")
                 Log.d(TAG, "设备ID获取成功: OpenConnection响应返回的deviceID=${response.deviceID}")
+                
+                // 设置基线库存（OpenConnection 成功后）
+                try {
+                    val levelsResponse = readCurrentLevels(response.deviceID)
+                    val levels = levelsResponse.allLevels?.associate { it.value to it.stored } ?: emptyMap()
+                    amountTracker.setBaseline(response.deviceID, levels)
+                } catch (e: Exception) {
+                    Log.w(TAG, "硬币器：设置基线库存失败，继续使用空库存", e)
+                    amountTracker.setBaseline(response.deviceID, emptyMap())  // 使用空库存
+                }
+                
                 true
             } else {
                 Log.e(TAG, "硬币器连接失败: ${response.error}")
@@ -789,6 +815,7 @@ class CashDeviceRepository(
                     _coinAcceptorDeviceID.value = null
                 }
                 lastKnownStatus.remove(deviceID)  // 清除状态缓存
+                amountTracker.removeDevice(deviceID)  // 清除金额跟踪
                 true
             } else {
                 Log.e(TAG, "设备断开失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
@@ -798,6 +825,242 @@ class CashDeviceRepository(
             Log.e(TAG, "断开设备连接异常: deviceID=$deviceID", e)
             false
         }
+    }
+    
+    /**
+     * 启动现金设备会话（认证 + 打开双设备连接）
+     * @return Map<String, String> 设备映射：deviceName -> deviceID
+     *         例如：{"SPECTRAL_PAYOUT-0" -> "device-id-1", "SMART_COIN_SYSTEM-1" -> "device-id-2"}
+     */
+    suspend fun startCashSession(): Map<String, String> {
+        Log.d(TAG, "启动现金设备会话...")
+        
+        // 重置金额跟踪器（新的支付会话）
+        amountTracker.reset()
+        
+        // 使用会话管理器启动会话
+        val devices = try {
+            sessionManager.startSession()
+        } catch (e: Exception) {
+            Log.e(TAG, "启动现金设备会话失败", e)
+            throw e
+        }
+        
+        // 更新设备ID映射（兼容现有代码）并设置基线金额
+        devices["SPECTRAL_PAYOUT-0"]?.let { deviceID ->
+            _billAcceptorDeviceID.value = deviceID
+            Log.d(TAG, "纸币器 deviceID: $deviceID")
+            // 设置基线库存（OpenConnection 成功后）
+            try {
+                val levelsResponse = readCurrentLevels(deviceID)
+                val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
+                amountTracker.setBaseline(deviceID, levels)
+            } catch (e: Exception) {
+                Log.w(TAG, "纸币器：设置基线库存失败，继续使用空库存", e)
+                amountTracker.setBaseline(deviceID, emptyMap())  // 使用空库存
+            }
+        }
+        devices["SMART_COIN_SYSTEM-1"]?.let { deviceID ->
+            _coinAcceptorDeviceID.value = deviceID
+            Log.d(TAG, "硬币器 deviceID: $deviceID")
+            // 设置基线库存（OpenConnection 成功后）
+            try {
+                val levelsResponse = readCurrentLevels(deviceID)
+                val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
+                amountTracker.setBaseline(deviceID, levels)
+            } catch (e: Exception) {
+                Log.w(TAG, "硬币器：设置基线库存失败，继续使用空库存", e)
+                amountTracker.setBaseline(deviceID, emptyMap())  // 使用空库存
+            }
+        }
+        
+        Log.d(TAG, "现金设备会话启动成功: 已注册设备数量=${devices.size}")
+        return devices
+    }
+    
+    /**
+     * 读取当前库存（获取设备各面额库存）
+     * @param deviceID 设备ID
+     * @return LevelsResponse 库存响应（包含各面额的 Value 和 Stored）
+     */
+    suspend fun readCurrentLevels(deviceID: String): LevelsResponse {
+        return try {
+            Log.d(TAG, "读取库存: deviceID=$deviceID")
+            val levelsResponse = api.getAllLevels(deviceID)
+            val levelsList = levelsResponse.levels ?: emptyList()
+            val levelsCount = levelsList.size
+            val totalCents = levelsResponse.calculateTotalCents()
+            
+            // 详细日志（不允许再出现 Levels 响应条目数=0 但 HTTP Body 明明有 Levels 这种情况）
+            Log.d(TAG, "GetAllLevels 响应: deviceID=$deviceID, levelsCount=$levelsCount, totalCents=$totalCents (${levelsResponse.calculateTotalAmount()}元), success=${levelsResponse.success}, message=${levelsResponse.message}")
+            
+            if (levelsCount == 0) {
+                Log.w(TAG, "GetAllLevels 返回空列表: deviceID=$deviceID, success=${levelsResponse.success}, message=${levelsResponse.message}")
+            } else {
+                // 打印每个面额的详细信息
+                levelsList.forEach { level ->
+                    Log.d(TAG, "  面额: Value=${level.value}分, Stored=${level.stored}, CountryCode=${level.countryCode}")
+                }
+            }
+            
+            // 如果 levels 为空但 success=true，返回空列表（至少返回 emptyList 但要有日志说明原因）
+            if (levelsCount == 0 && levelsResponse.success == true) {
+                Log.d(TAG, "GetAllLevels 返回空列表但 success=true，可能是设备库存为空: deviceID=$deviceID")
+            }
+            
+            levelsResponse
+        } catch (e: retrofit2.HttpException) {
+            // HTTP 错误（如 404）
+            val code = e.code()
+            val errorBody = e.response()?.errorBody()?.string() ?: ""
+            Log.e(TAG, "读取库存 HTTP 错误: endpoint=GetAllLevels, deviceID=$deviceID, code=$code, errorBody=$errorBody")
+            // 返回空的库存响应（容错处理），不把金额清零
+            LevelsResponse(deviceID = deviceID, error = "HTTP $code: $errorBody")
+        } catch (e: Exception) {
+            Log.e(TAG, "读取库存异常: deviceID=$deviceID", e)
+            // 返回空的库存响应（容错处理），不把金额清零
+            LevelsResponse(deviceID = deviceID, error = e.message)
+        }
+    }
+    
+    /**
+     * 轮询库存（获取设备已收金额）- 基于库存差值计算本次会话累计金额
+     * @param deviceID 设备ID
+     * @return LevelsResponse 库存响应（包含各面额的 Value 和 Stored）
+     */
+    suspend fun pollLevels(deviceID: String): LevelsResponse {
+        return try {
+            Log.d(TAG, "轮询库存: deviceID=$deviceID")
+            val levelsResponse = readCurrentLevels(deviceID)
+            
+            // 更新金额跟踪器（基于库存差值计算本次会话累计金额）
+            // 如果读取失败（error != null），保留上一次成功值，不更新
+            if (levelsResponse.error == null && levelsResponse.levels != null) {
+                amountTracker.update(deviceID, levelsResponse)
+                
+                // 轮询日志必须打印：deviceId、levelsCount、totalCents、baseline、delta
+                val levelsCount = levelsResponse.levels.size
+                val totalCents = levelsResponse.calculateTotalCents()
+                val baselineTotalCents = amountTracker.getDeviceBaselineCents(deviceID)
+                val sessionDeltaCents = amountTracker.getDeviceSessionCents(deviceID)
+                Log.d(TAG, "轮询日志: deviceID=$deviceID, levelsCount=$levelsCount, totalCents=$totalCents, baselineTotalCents=$baselineTotalCents, sessionDeltaCents=$sessionDeltaCents")
+            } else {
+                Log.w(TAG, "轮询库存失败，保留上一次成功值: deviceID=$deviceID, error=${levelsResponse.error}")
+            }
+            
+            levelsResponse
+        } catch (e: Exception) {
+            Log.e(TAG, "轮询库存异常: deviceID=$deviceID", e)
+            // 返回空的库存响应（容错处理），不把金额清零
+            LevelsResponse(deviceID = deviceID, error = e.message)
+        }
+    }
+    
+    /**
+     * 获取所有面额库存（用于 UI 显示）
+     * @param deviceID 设备ID
+     * @return List<LevelEntry> 面额库存列表（非空，至少返回 emptyList）
+     */
+    suspend fun getAllLevels(deviceID: String): List<LevelEntry> {
+        return try {
+            val levelsResponse = readCurrentLevels(deviceID)
+            val levels = levelsResponse.levels ?: emptyList()
+            if (levels.isEmpty()) {
+                Log.d(TAG, "getAllLevels 返回空列表: deviceID=$deviceID（可能是设备库存为空）")
+            }
+            levels
+        } catch (e: Exception) {
+            Log.e(TAG, "getAllLevels 异常: deviceID=$deviceID", e)
+            emptyList()  // 至少返回 emptyList
+        }
+    }
+    
+    /**
+     * 找零（按金额）
+     * @param deviceID 设备ID
+     * @param valueCents 找零金额（分），如 200 表示 2€
+     * @param countryCode 货币代码，默认 EUR
+     * @return Boolean 是否成功
+     */
+    suspend fun dispenseValue(deviceID: String, valueCents: Int, countryCode: String = "EUR"): Boolean {
+        return try {
+            Log.d(TAG, "找零: deviceID=$deviceID, valueCents=$valueCents (${valueCents / 100.0}元), countryCode=$countryCode")
+            val request = DispenseValueRequest(value = valueCents, countryCode = countryCode)
+            val response = api.dispenseValue(deviceID, request)
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "DispenseValue 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            if (response.isSuccessful) {
+                Log.d(TAG, "找零成功: deviceID=$deviceID, valueCents=$valueCents, body=$bodyText")
+                true
+            } else {
+                Log.e(TAG, "找零失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "找零异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * 启用找零
+     * @param deviceID 设备ID
+     * @return Boolean 是否成功
+     */
+    suspend fun enablePayout(deviceID: String): Boolean {
+        return try {
+            Log.d(TAG, "启用找零: deviceID=$deviceID")
+            val response = api.enablePayout(deviceID)
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "EnablePayout 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            response.isSuccessful
+        } catch (e: Exception) {
+            Log.e(TAG, "启用找零异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * 禁用找零
+     * @param deviceID 设备ID
+     * @return Boolean 是否成功
+     */
+    suspend fun disablePayout(deviceID: String): Boolean {
+        return try {
+            Log.d(TAG, "禁用找零: deviceID=$deviceID")
+            val response = api.disablePayout(deviceID)
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(TAG, "DisablePayout 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            response.isSuccessful
+        } catch (e: Exception) {
+            Log.e(TAG, "禁用找零异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * 轮询计数器（获取设备已收金额）- 已废弃，请使用 pollStoredValue
+     * @deprecated 请使用 pollStoredValue（基于 GetStoredValue 和基线机制）
+     */
+    @Deprecated("请使用 pollStoredValue（基于 GetStoredValue 和基线机制）", ReplaceWith("pollStoredValue(deviceID)"))
+    suspend fun pollCounters(deviceID: String): CountersResponse {
+        return try {
+            Log.d(TAG, "轮询计数器: deviceID=$deviceID (已废弃，请使用 pollStoredValue)")
+            val counters = api.getCounters(deviceID)
+            Log.d(TAG, "GetCounters 响应: deviceID=${counters.deviceID}, stackedTotalCents=${counters.stackedTotalCents} (${counters.totalAmount}元)")
+            counters
+        } catch (e: Exception) {
+            Log.e(TAG, "轮询计数器异常: deviceID=$deviceID", e)
+            // 返回空的计数器响应（容错处理）
+            CountersResponse(deviceID = deviceID, error = e.message)
+        }
+    }
+    
+    /**
+     * 获取金额跟踪器（用于获取总金额）
+     */
+    fun getAmountTracker(): CashAmountTracker {
+        return amountTracker
     }
     
     /**
