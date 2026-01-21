@@ -80,9 +80,9 @@ object CashDeviceClient {
      * 创建带指定超时的 Retrofit 实例（用于探测）
      * @param baseUrl 基础 URL，如果为 null 则从配置读取或使用默认值
      * @param context 用于读取配置的 Context（可选）
-     * @param timeoutSeconds 超时时间（秒），默认 12 秒（OpenConnection 需要等待设备响应）
+     * @param timeoutSeconds 超时时间（秒），默认 30 秒（OpenConnection 需要等待设备响应）
      */
-    fun createWithTimeout(baseUrl: String? = null, context: Context? = null, timeoutSeconds: Long = 12): CashDeviceApi {
+    fun createWithTimeout(baseUrl: String? = null, context: Context? = null, timeoutSeconds: Long = 30): CashDeviceApi {
         val rawBaseUrl = baseUrl ?: getBaseUrl(context)
         val normalizedBaseUrl = if (rawBaseUrl.endsWith("/")) rawBaseUrl else "$rawBaseUrl/"
         

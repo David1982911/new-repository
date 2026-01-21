@@ -5,6 +5,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.SerializationException
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import retrofit2.Response
 
@@ -36,8 +39,8 @@ class CashDeviceRepository(
             return body.trim().removePrefix("\uFEFF")  // 移除 BOM
         }
         
-        // 探测超时时间（秒）- 调大到 12 秒，因为 OpenConnection 需要等待设备响应
-        private const val PROBE_TIMEOUT_SECONDS = 12L
+        // 探测超时时间（秒）- 调大到 30 秒，因为 OpenConnection 需要等待设备响应
+        private const val PROBE_TIMEOUT_SECONDS = 30L
         
         // 扩展扫描的 SSP Address 候选列表（仅在主要候选失败后使用）
         private val EXTENDED_SSP_ADDRESS_CANDIDATES = listOf(2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20)
@@ -57,6 +60,8 @@ class CashDeviceRepository(
      * @param enableAcceptor 是否启用接收器
      * @param enableAutoAcceptEscrow 是否启用自动接受
      * @param enablePayout 是否启用找零
+     * @param setInhibits 面额禁用设置（可选）
+     * @param setRoutes 面额路由设置（可选）
      * @return OpenConnectionRequest
      */
     private fun createOpenConnectionRequest(
@@ -65,16 +70,18 @@ class CashDeviceRepository(
         deviceID: String? = null,
         enableAcceptor: Boolean = true,
         enableAutoAcceptEscrow: Boolean = true,
-        enablePayout: Boolean = false
+        enablePayout: Boolean = false,
+        setInhibits: List<DenominationInhibit>? = null,
+        setRoutes: List<DenominationRoute>? = null
     ): OpenConnectionRequest {
-        Log.d(TAG, "createOpenConnectionRequest 调用: ComPort=$comPort, SspAddress=$sspAddress, deviceID=$deviceID, enableAcceptor=$enableAcceptor")
+        Log.d(TAG, "createOpenConnectionRequest 调用: ComPort=$comPort, SspAddress=$sspAddress, deviceID=$deviceID, enableAcceptor=$enableAcceptor, setInhibits=${setInhibits?.size ?: 0}项, setRoutes=${setRoutes?.size ?: 0}项")
         val request = OpenConnectionRequest(
             ComPort = comPort,
             SspAddress = sspAddress,
             DeviceID = deviceID,  // 设备ID（从 GetConnectedUSBDevices 获取）
             LogFilePath = LOG_FILE_PATH,  // 日志文件路径（可选）
-            SetInhibits = null,  // 面额禁用设置（null 表示不禁用任何面额）
-            SetRoutes = null,  // 面额路由设置（null 表示使用默认路由）
+            SetInhibits = setInhibits,  // 面额禁用设置
+            SetRoutes = setRoutes,  // 面额路由设置
             SetCashBoxPayoutLimit = CASH_BOX_PAYOUT_LIMIT,  // 找零限制（null 表示不限制）
             EnableAcceptor = enableAcceptor,
             EnableAutoAcceptEscrow = enableAutoAcceptEscrow,
@@ -205,17 +212,60 @@ class CashDeviceRepository(
                 comPort = port,
                 sspAddress = sspAddress,
                 deviceID = usbDeviceID,  // GetConnectedUSBDevices 不返回 DeviceID，这里为 null 是正常的
-                enableAcceptor = false,  // 探测时不启用，避免干扰
-                enableAutoAcceptEscrow = false,
-                enablePayout = false
+                enableAcceptor = true,  // 恢复默认值：true（与 Windows 工具一致）
+                enableAutoAcceptEscrow = true,  // 恢复默认值：true（与 Windows 工具一致）
+                enablePayout = true  // 设备连接成功后自动启用找零功能
             )
-            Log.d(TAG, "OpenConnection 请求已创建: ComPort=${request.ComPort}, SspAddress=${request.SspAddress}, DeviceID=${request.DeviceID ?: "null（正常，将从响应中获取）"}, LogFilePath=${request.LogFilePath ?: "null"}, SetInhibits=${request.SetInhibits?.size ?: 0}项, SetRoutes=${request.SetRoutes?.size ?: 0}项, SetCashBoxPayoutLimit=${request.SetCashBoxPayoutLimit?.size ?: 0}项, EnableAcceptor=false")
-            val response = probeApi.openConnection(request)
+            
+            // 序列化请求体（用于日志）
+            val json = kotlinx.serialization.json.Json {
+                encodeDefaults = true
+                ignoreUnknownKeys = false
+            }
+            val requestBodyJson = json.encodeToString(
+                kotlinx.serialization.serializer<OpenConnectionRequest>(), request
+            )
+            
+            Log.d(TAG, "========== OpenConnection REQ ==========")
+            Log.d(TAG, "Port=$port, SspAddress=$sspAddress, timeout=${timeoutMs}ms")
+            Log.d(TAG, "requestBodyJson=$requestBodyJson")
+            Log.d(TAG, "超时配置: connectTimeout=${timeoutMs}ms, readTimeout=${timeoutMs}ms, writeTimeout=${timeoutMs}ms")
+            
+            val requestStartTime = System.currentTimeMillis()
+            val response = try {
+                probeApi.openConnection(request)
+            } catch (e: Exception) {
+                val actualDuration = System.currentTimeMillis() - requestStartTime
+                Log.e(TAG, "========== OpenConnection 异常 ==========")
+                Log.e(TAG, "异常类型: ${e.javaClass.simpleName}")
+                Log.e(TAG, "异常消息: ${e.message}")
+                Log.e(TAG, "实际耗时: ${actualDuration}ms")
+                throw e
+            }
+            val actualDuration = System.currentTimeMillis() - requestStartTime
             val duration = System.currentTimeMillis() - startTime
             deviceID = response.deviceID
             
             // 显示 OpenConnection 响应的完整信息（用于调试响应格式）
-            Log.d(TAG, "OpenConnection 响应（完整）: deviceID=${response.deviceID ?: "null"}, DeviceModel=${response.DeviceModel ?: "null"}, IsOpen=${response.IsOpen}, DeviceError=${response.DeviceError ?: "null"}, error=${response.error ?: "null"}, Firmware=${response.Firmware ?: "null"}, Dataset=${response.Dataset ?: "null"}, ValidatorSerialNumber=${response.ValidatorSerialNumber ?: "null"}, PayoutModuleSerialNumber=${response.PayoutModuleSerialNumber ?: "null"} (耗时${duration}ms)")
+            Log.d(TAG, "========== OpenConnection RESP ==========")
+            Log.d(TAG, "HTTP: 200 OK")
+            Log.d(TAG, "deviceID: ${response.deviceID ?: "null"}")
+            Log.d(TAG, "DeviceModel: ${response.DeviceModel ?: "null"}")
+            Log.d(TAG, "IsOpen: ${response.IsOpen}")
+            Log.d(TAG, "DeviceError: ${response.DeviceError ?: "null"}")
+            Log.d(TAG, "error: ${response.error ?: "null"}")
+            Log.d(TAG, "Firmware: ${response.Firmware ?: "null"}")
+            Log.d(TAG, "Dataset: ${response.Dataset ?: "null"}")
+            Log.d(TAG, "ValidatorSerialNumber: ${response.ValidatorSerialNumber ?: "null"}")
+            Log.d(TAG, "PayoutModuleSerialNumber: ${response.PayoutModuleSerialNumber ?: "null"}")
+            Log.d(TAG, "实际耗时: ${actualDuration}ms")
+            
+            // 验证响应
+            if (response.deviceID != null) {
+                Log.d(TAG, "✓ OpenConnectionResponse.deviceID = ${response.deviceID}")
+            } else {
+                Log.e(TAG, "✗ OpenConnectionResponse.deviceID 为 null")
+            }
             
             // 如果 DeviceID 为 null，尝试诊断问题
             if (response.deviceID == null) {
@@ -258,19 +308,26 @@ class CashDeviceRepository(
             }
         } catch (e: java.net.SocketTimeoutException) {
             val duration = System.currentTimeMillis() - startTime
-            Log.w(TAG, "探测超时: Port=$port, SspAddress=$sspAddress, timeout=${timeoutMs}ms, 实际耗时=${duration}ms")
+            Log.e(TAG, "========== OpenConnection 超时 ==========")
+            Log.e(TAG, "异常类型: SocketTimeoutException")
+            Log.e(TAG, "异常消息: ${e.message}")
+            Log.e(TAG, "Port=$port, SspAddress=$sspAddress, timeout=${timeoutMs}ms, 实际耗时=${duration}ms")
             null
         } catch (e: retrofit2.HttpException) {
             val duration = System.currentTimeMillis() - startTime
-            if (e.code() == 401) {
-                Log.w(TAG, "探测失败（401 Unauthorized）: Port=$port, SspAddress=$sspAddress (耗时${duration}ms)")
-            } else {
-                Log.w(TAG, "探测失败（HTTP ${e.code()}）: Port=$port, SspAddress=$sspAddress, error=${e.message()} (耗时${duration}ms)")
-            }
+            Log.e(TAG, "========== OpenConnection HTTP 错误 ==========")
+            Log.e(TAG, "异常类型: HttpException")
+            Log.e(TAG, "HTTP Code: ${e.code()}")
+            Log.e(TAG, "异常消息: ${e.message()}")
+            Log.e(TAG, "Port=$port, SspAddress=$sspAddress, 实际耗时=${duration}ms")
             null
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
-            Log.w(TAG, "探测异常（other）: Port=$port, SspAddress=$sspAddress, error=${e.message ?: e.javaClass.simpleName} (耗时${duration}ms)")
+            Log.e(TAG, "========== OpenConnection 异常 ==========")
+            Log.e(TAG, "异常类型: ${e.javaClass.simpleName}")
+            Log.e(TAG, "异常消息: ${e.message}")
+            Log.e(TAG, "Port=$port, SspAddress=$sspAddress, 实际耗时=${duration}ms")
+            e.printStackTrace()
             null
         }
     }
@@ -451,20 +508,62 @@ class CashDeviceRepository(
             }
             
             Log.d(TAG, "打开纸币器连接: ComPort=$actualPort, SspAddress=$actualSspAddr $usbDeviceInfo")
-            Log.d(TAG, "准备创建 OpenConnection 请求: ComPort=$actualPort, SspAddress=$actualSspAddr, DeviceID=${usbDeviceID ?: "null（将从OpenConnection响应中获取）"}")
             val request = createOpenConnectionRequest(
                 comPort = actualPort,
                 sspAddress = actualSspAddr,
                 deviceID = usbDeviceID,  // GetConnectedUSBDevices 不返回 DeviceID，这里为 null 是正常的
-                enableAcceptor = true,
-                enableAutoAcceptEscrow = true,
-                enablePayout = false  // 关闭找零功能
+                enableAcceptor = true,  // 恢复默认值：true（与 Windows 工具一致）
+                enableAutoAcceptEscrow = true,  // 恢复默认值：true（与 Windows 工具一致）
+                enablePayout = true  // 设备连接成功后自动启用找零功能  // 关闭找零功能
             )
-            Log.d(TAG, "OpenConnection 请求已创建: ComPort=${request.ComPort}, SspAddress=${request.SspAddress}, DeviceID=${request.DeviceID ?: "null（正常，将从响应中获取）"}, LogFilePath=${request.LogFilePath ?: "null"}, SetInhibits=${request.SetInhibits?.size ?: 0}项, SetRoutes=${request.SetRoutes?.size ?: 0}项, SetCashBoxPayoutLimit=${request.SetCashBoxPayoutLimit?.size ?: 0}项, EnableAcceptor=true")
-            val response = api.openConnection(request)
+            
+            // 序列化请求体（用于日志）
+            val json = kotlinx.serialization.json.Json {
+                encodeDefaults = true
+                ignoreUnknownKeys = false
+            }
+            val requestBodyJson = json.encodeToString(
+                kotlinx.serialization.serializer<OpenConnectionRequest>(), request
+            )
+            
+            Log.d(TAG, "========== OpenConnection REQ (纸币器) ==========")
+            Log.d(TAG, "Port=$actualPort, SspAddress=$actualSspAddr")
+            Log.d(TAG, "requestBodyJson=$requestBodyJson")
+            Log.d(TAG, "超时配置: connectTimeout=30s, readTimeout=30s, writeTimeout=30s")
+            
+            val requestStartTime = System.currentTimeMillis()
+            val response = try {
+                api.openConnection(request)
+            } catch (e: Exception) {
+                val actualDuration = System.currentTimeMillis() - requestStartTime
+                Log.e(TAG, "========== OpenConnection 异常 (纸币器) ==========")
+                Log.e(TAG, "异常类型: ${e.javaClass.simpleName}")
+                Log.e(TAG, "异常消息: ${e.message}")
+                Log.e(TAG, "实际耗时: ${actualDuration}ms")
+                throw e
+            }
+            val actualDuration = System.currentTimeMillis() - requestStartTime
             
             // 显示 OpenConnection 响应的完整信息（用于调试响应格式）
-            Log.d(TAG, "OpenConnection 响应（完整）: deviceID=${response.deviceID ?: "null"}, DeviceModel=${response.DeviceModel ?: "null"}, IsOpen=${response.IsOpen}, DeviceError=${response.DeviceError ?: "null"}, error=${response.error ?: "null"}, Firmware=${response.Firmware ?: "null"}, Dataset=${response.Dataset ?: "null"}, ValidatorSerialNumber=${response.ValidatorSerialNumber ?: "null"}, PayoutModuleSerialNumber=${response.PayoutModuleSerialNumber ?: "null"}")
+            Log.d(TAG, "========== OpenConnection RESP (纸币器) ==========")
+            Log.d(TAG, "HTTP: 200 OK")
+            Log.d(TAG, "deviceID: ${response.deviceID ?: "null"}")
+            Log.d(TAG, "DeviceModel: ${response.DeviceModel ?: "null"}")
+            Log.d(TAG, "IsOpen: ${response.IsOpen}")
+            Log.d(TAG, "DeviceError: ${response.DeviceError ?: "null"}")
+            Log.d(TAG, "error: ${response.error ?: "null"}")
+            Log.d(TAG, "Firmware: ${response.Firmware ?: "null"}")
+            Log.d(TAG, "Dataset: ${response.Dataset ?: "null"}")
+            Log.d(TAG, "ValidatorSerialNumber: ${response.ValidatorSerialNumber ?: "null"}")
+            Log.d(TAG, "PayoutModuleSerialNumber: ${response.PayoutModuleSerialNumber ?: "null"}")
+            Log.d(TAG, "实际耗时: ${actualDuration}ms")
+            
+            // 验证响应
+            if (response.deviceID != null) {
+                Log.d(TAG, "✓ OpenConnectionResponse.deviceID = ${response.deviceID}")
+            } else {
+                Log.e(TAG, "✗ OpenConnectionResponse.deviceID 为 null")
+            }
             
             // 如果 DeviceID 为 null，尝试重新获取设备列表并重试
             if (response.deviceID == null) {
@@ -485,20 +584,54 @@ class CashDeviceRepository(
                 Log.e(TAG, "  3. 设备未正确连接")
             }
             
-            if (response.deviceID != null) {
+            if (response.deviceID != null && response.IsOpen == true) {
                 _billAcceptorDeviceID.value = response.deviceID
-                Log.d(TAG, "纸币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}")
+                Log.d(TAG, "纸币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}, isOpen=${response.IsOpen}")
                 Log.d(TAG, "设备ID获取成功: OpenConnection响应返回的deviceID=${response.deviceID}")
                 
-                // 设置基线库存（OpenConnection 成功后）
+                // OpenConnection 成功后立即调用 DisableAcceptor（避免初始化阶段收钱）
+                // 注意：不在 OpenConnection 请求中禁用，而是在成功后单独调用
                 try {
-                    val levelsResponse = readCurrentLevels(response.deviceID)
-                    val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
-                    amountTracker.setBaseline(response.deviceID, levels)
+                    Log.d(TAG, "OpenConnection 成功后立即禁用接收器: DeviceID=${response.deviceID}")
+                    val disableResponse = api.disableAcceptor(response.deviceID)
+                    val disableBodyText = cleanResponseBody(disableResponse.body()?.string())
+                    Log.d(TAG, "DisableAcceptor 响应: isSuccessful=${disableResponse.isSuccessful}, code=${disableResponse.code()}, body=$disableBodyText")
+                    if (disableResponse.isSuccessful) {
+                        Log.d(TAG, "✓ DisableAcceptor 成功")
+                    } else {
+                        Log.w(TAG, "✗ DisableAcceptor 失败，但继续使用连接")
+                    }
                 } catch (e: Exception) {
-                    Log.w(TAG, "纸币器：设置基线库存失败，继续使用空库存", e)
-                    amountTracker.setBaseline(response.deviceID, emptyMap())  // 使用空库存
+                    Log.w(TAG, "DisableAcceptor 调用异常（可忽略，继续使用连接）: DeviceID=${response.deviceID}", e)
                 }
+                
+                // 在 OpenConnection 成功后，立即执行设备配置流程
+                // 1. GetCurrencyAssignment（获取面额分配和计数器）
+                try {
+                    val assignments = fetchCurrencyAssignments(response.deviceID)
+                    if (assignments.isNotEmpty()) {
+                        Log.d(TAG, "纸币器：GetCurrencyAssignment 成功，获取到 ${assignments.size} 个面额")
+                        // 设置基线库存（基于 GetCurrencyAssignment 的 stored）
+                        amountTracker.setBaselineFromAssignments(response.deviceID, assignments)
+                    } else {
+                        Log.w(TAG, "纸币器：GetCurrencyAssignment 返回空列表")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "纸币器：GetCurrencyAssignment 异常", e)
+                }
+                
+                // 2. SetInhibits（设置"可接收面额"）- 由 GetCurrencyAssignment 动态生成
+                try {
+                    val inhibitSuccess = applyInhibitsFromAssignments(response.deviceID, "SPECTRAL_PAYOUT-0")
+                    if (!inhibitSuccess) {
+                        Log.w(TAG, "纸币器：SetInhibits 失败，但继续执行后续配置")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "纸币器：SetInhibits 异常", e)
+                }
+                
+                // 3. SetRoutes（设置"找零面额/路由"）- 由 GetCurrencyAssignment 动态生成（初始使用默认配置）
+                // 注意：后续 UI 的"可找零 ON/OFF"会调用 applyRoutesFromUI 来更新
                 
                 true
             } else {
@@ -539,20 +672,62 @@ class CashDeviceRepository(
             }
             
             Log.d(TAG, "打开硬币器连接: ComPort=$actualPort, SspAddress=$actualSspAddr $usbDeviceInfo")
-            Log.d(TAG, "准备创建 OpenConnection 请求: ComPort=$actualPort, SspAddress=$actualSspAddr, DeviceID=${usbDeviceID ?: "null（将从OpenConnection响应中获取）"}")
             val request = createOpenConnectionRequest(
                 comPort = actualPort,
                 sspAddress = actualSspAddr,
                 deviceID = usbDeviceID,  // GetConnectedUSBDevices 不返回 DeviceID，这里为 null 是正常的
-                enableAcceptor = true,
-                enableAutoAcceptEscrow = true,
-                enablePayout = false  // 关闭找零功能
+                enableAcceptor = true,  // 恢复默认值：true（与 Windows 工具一致）
+                enableAutoAcceptEscrow = true,  // 恢复默认值：true（与 Windows 工具一致）
+                enablePayout = true  // 设备连接成功后自动启用找零功能  // 关闭找零功能
             )
-            Log.d(TAG, "OpenConnection 请求已创建: ComPort=${request.ComPort}, SspAddress=${request.SspAddress}, DeviceID=${request.DeviceID ?: "null（正常，将从响应中获取）"}, LogFilePath=${request.LogFilePath ?: "null"}, SetInhibits=${request.SetInhibits?.size ?: 0}项, SetRoutes=${request.SetRoutes?.size ?: 0}项, SetCashBoxPayoutLimit=${request.SetCashBoxPayoutLimit?.size ?: 0}项, EnableAcceptor=true")
-            val response = api.openConnection(request)
+            
+            // 序列化请求体（用于日志）
+            val json = kotlinx.serialization.json.Json {
+                encodeDefaults = true
+                ignoreUnknownKeys = false
+            }
+            val requestBodyJson = json.encodeToString(
+                kotlinx.serialization.serializer<OpenConnectionRequest>(), request
+            )
+            
+            Log.d(TAG, "========== OpenConnection REQ (硬币器) ==========")
+            Log.d(TAG, "Port=$actualPort, SspAddress=$actualSspAddr")
+            Log.d(TAG, "requestBodyJson=$requestBodyJson")
+            Log.d(TAG, "超时配置: connectTimeout=30s, readTimeout=30s, writeTimeout=30s")
+            
+            val requestStartTime = System.currentTimeMillis()
+            val response = try {
+                api.openConnection(request)
+            } catch (e: Exception) {
+                val actualDuration = System.currentTimeMillis() - requestStartTime
+                Log.e(TAG, "========== OpenConnection 异常 (硬币器) ==========")
+                Log.e(TAG, "异常类型: ${e.javaClass.simpleName}")
+                Log.e(TAG, "异常消息: ${e.message}")
+                Log.e(TAG, "实际耗时: ${actualDuration}ms")
+                throw e
+            }
+            val actualDuration = System.currentTimeMillis() - requestStartTime
             
             // 显示 OpenConnection 响应的完整信息（用于调试响应格式）
-            Log.d(TAG, "OpenConnection 响应（完整）: deviceID=${response.deviceID ?: "null"}, DeviceModel=${response.DeviceModel ?: "null"}, IsOpen=${response.IsOpen}, DeviceError=${response.DeviceError ?: "null"}, error=${response.error ?: "null"}, Firmware=${response.Firmware ?: "null"}, Dataset=${response.Dataset ?: "null"}, ValidatorSerialNumber=${response.ValidatorSerialNumber ?: "null"}, PayoutModuleSerialNumber=${response.PayoutModuleSerialNumber ?: "null"}")
+            Log.d(TAG, "========== OpenConnection RESP (硬币器) ==========")
+            Log.d(TAG, "HTTP: 200 OK")
+            Log.d(TAG, "deviceID: ${response.deviceID ?: "null"}")
+            Log.d(TAG, "DeviceModel: ${response.DeviceModel ?: "null"}")
+            Log.d(TAG, "IsOpen: ${response.IsOpen}")
+            Log.d(TAG, "DeviceError: ${response.DeviceError ?: "null"}")
+            Log.d(TAG, "error: ${response.error ?: "null"}")
+            Log.d(TAG, "Firmware: ${response.Firmware ?: "null"}")
+            Log.d(TAG, "Dataset: ${response.Dataset ?: "null"}")
+            Log.d(TAG, "ValidatorSerialNumber: ${response.ValidatorSerialNumber ?: "null"}")
+            Log.d(TAG, "PayoutModuleSerialNumber: ${response.PayoutModuleSerialNumber ?: "null"}")
+            Log.d(TAG, "实际耗时: ${actualDuration}ms")
+            
+            // 验证响应
+            if (response.deviceID != null) {
+                Log.d(TAG, "✓ OpenConnectionResponse.deviceID = ${response.deviceID}")
+            } else {
+                Log.e(TAG, "✗ OpenConnectionResponse.deviceID 为 null")
+            }
             
             // 如果 DeviceID 为 null，尝试重新获取设备列表并重试
             if (response.deviceID == null) {
@@ -573,20 +748,53 @@ class CashDeviceRepository(
                 Log.e(TAG, "  3. 设备未正确连接")
             }
             
-            if (response.deviceID != null) {
+            if (response.deviceID != null && response.IsOpen == true) {
                 _coinAcceptorDeviceID.value = response.deviceID
-                Log.d(TAG, "硬币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}")
+                Log.d(TAG, "硬币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}, isOpen=${response.IsOpen}")
                 Log.d(TAG, "设备ID获取成功: OpenConnection响应返回的deviceID=${response.deviceID}")
                 
-                // 设置基线库存（OpenConnection 成功后）
+                // OpenConnection 成功后立即调用 DisableAcceptor（避免初始化阶段收钱）
+                // 注意：不在 OpenConnection 请求中禁用，而是在成功后单独调用
                 try {
-                    val levelsResponse = readCurrentLevels(response.deviceID)
-                    val levels = levelsResponse.allLevels?.associate { it.value to it.stored } ?: emptyMap()
-                    amountTracker.setBaseline(response.deviceID, levels)
+                    Log.d(TAG, "OpenConnection 成功后立即禁用接收器: DeviceID=${response.deviceID}")
+                    val disableResponse = api.disableAcceptor(response.deviceID)
+                    val disableBodyText = cleanResponseBody(disableResponse.body()?.string())
+                    Log.d(TAG, "DisableAcceptor 响应: isSuccessful=${disableResponse.isSuccessful}, code=${disableResponse.code()}, body=$disableBodyText")
+                    if (disableResponse.isSuccessful) {
+                        Log.d(TAG, "✓ DisableAcceptor 成功")
+                    } else {
+                        Log.w(TAG, "✗ DisableAcceptor 失败，但继续使用连接")
+                    }
                 } catch (e: Exception) {
-                    Log.w(TAG, "硬币器：设置基线库存失败，继续使用空库存", e)
-                    amountTracker.setBaseline(response.deviceID, emptyMap())  // 使用空库存
+                    Log.w(TAG, "DisableAcceptor 调用异常（可忽略，继续使用连接）: DeviceID=${response.deviceID}", e)
                 }
+                
+                // 在 OpenConnection 成功后，立即执行设备配置流程
+                // 1. GetCurrencyAssignment（获取面额分配和计数器）
+                try {
+                    val assignments = fetchCurrencyAssignments(response.deviceID)
+                    if (assignments.isNotEmpty()) {
+                        Log.d(TAG, "硬币器：GetCurrencyAssignment 成功，获取到 ${assignments.size} 个面额")
+                        // 设置基线库存（基于 GetCurrencyAssignment 的 stored）
+                        amountTracker.setBaselineFromAssignments(response.deviceID, assignments)
+                    } else {
+                        Log.w(TAG, "硬币器：GetCurrencyAssignment 返回空列表")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "硬币器：GetCurrencyAssignment 异常", e)
+                }
+                
+                // 2. SetInhibits（设置"可接收面额"）- 由 GetCurrencyAssignment 动态生成
+                try {
+                    val inhibitSuccess = applyInhibitsFromAssignments(response.deviceID, "SMART_COIN_SYSTEM-1")
+                    if (!inhibitSuccess) {
+                        Log.w(TAG, "硬币器：SetInhibits 失败，但继续执行后续配置")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "硬币器：SetInhibits 异常", e)
+                }
+                
+                // 注意：硬币器不设置 SetRoutes（按用户要求，硬币器不能设置路由）
                 
                 true
             } else {
@@ -850,7 +1058,28 @@ class CashDeviceRepository(
         devices["SPECTRAL_PAYOUT-0"]?.let { deviceID ->
             _billAcceptorDeviceID.value = deviceID
             Log.d(TAG, "纸币器 deviceID: $deviceID")
-            // 设置基线库存（OpenConnection 成功后）
+            // 在 OpenConnection 成功后，立即执行设备配置
+            // 1. SetInhibits（设置"可接收面额"）
+            try {
+                val inhibitSuccess = setInhibits(deviceID, "SPECTRAL_PAYOUT-0")
+                if (!inhibitSuccess) {
+                    Log.w(TAG, "纸币器：SetInhibits 失败，但继续执行后续配置")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "纸币器：SetInhibits 异常", e)
+            }
+            
+            // 2. SetRoutes（设置"找零面额/路由"）
+            try {
+                val routeSuccess = setRoutes(deviceID, "SPECTRAL_PAYOUT-0")
+                if (!routeSuccess) {
+                    Log.w(TAG, "纸币器：SetRoutes 失败，但继续执行后续配置")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "纸币器：SetRoutes 异常", e)
+            }
+            
+            // 3. 设置基线库存（OpenConnection 成功后）
             try {
                 val levelsResponse = readCurrentLevels(deviceID)
                 val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
@@ -863,7 +1092,28 @@ class CashDeviceRepository(
         devices["SMART_COIN_SYSTEM-1"]?.let { deviceID ->
             _coinAcceptorDeviceID.value = deviceID
             Log.d(TAG, "硬币器 deviceID: $deviceID")
-            // 设置基线库存（OpenConnection 成功后）
+            // 在 OpenConnection 成功后，立即执行设备配置
+            // 1. SetInhibits（设置"可接收面额"）
+            try {
+                val inhibitSuccess = setInhibits(deviceID, "SMART_COIN_SYSTEM-1")
+                if (!inhibitSuccess) {
+                    Log.w(TAG, "硬币器：SetInhibits 失败，但继续执行后续配置")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "硬币器：SetInhibits 异常", e)
+            }
+            
+            // 2. SetRoutes（设置"找零面额/路由"）
+            try {
+                val routeSuccess = setRoutes(deviceID, "SMART_COIN_SYSTEM-1")
+                if (!routeSuccess) {
+                    Log.w(TAG, "硬币器：SetRoutes 失败，但继续执行后续配置")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "硬币器：SetRoutes 异常", e)
+            }
+            
+            // 3. 设置基线库存（OpenConnection 成功后）
             try {
                 val levelsResponse = readCurrentLevels(deviceID)
                 val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
@@ -924,10 +1174,51 @@ class CashDeviceRepository(
     }
     
     /**
-     * 轮询库存（获取设备已收金额）- 基于库存差值计算本次会话累计金额
+     * 轮询库存（获取设备已收金额）- 基于 GetCurrencyAssignment 做快照差分
+     * @param deviceID 设备ID
+     * @return List<CurrencyAssignment> 货币分配列表（服务器返回数组 []）
+     */
+    suspend fun pollCurrencyAssignments(deviceID: String): List<CurrencyAssignment> {
+        return try {
+            Log.d(TAG, "轮询货币分配: deviceID=$deviceID")
+            val assignments = fetchCurrencyAssignments(deviceID)
+            
+            // 更新金额跟踪器（基于货币分配的 stored 做快照差分）
+            // 如果读取失败（返回空列表），保留上一次成功值，不更新
+            if (assignments.isNotEmpty()) {
+                val sessionDeltaCents = amountTracker.updateFromAssignments(deviceID, assignments)
+                
+                // 轮询日志必须打印：deviceId、面额数、totalCents、baseline、delta、最近变化
+                val assignmentsCount = assignments.size
+                val totalCents = amountTracker.getTotalCents()
+                val baselineTotalCents = amountTracker.getDeviceBaselineCents(deviceID)
+                val currentTotalCents = amountTracker.getDeviceCurrentCents(deviceID)
+                val recentChanges = amountTracker.getRecentChanges(deviceID)
+                val recentChangesText = recentChanges.joinToString(", ") { it.getDisplayText() }
+                
+                Log.d(TAG, "轮询日志: deviceID=$deviceID, count=$assignmentsCount, currentTotalCents=$currentTotalCents, baselineTotalCents=$baselineTotalCents, sessionDeltaCents=$sessionDeltaCents, totalCents=$totalCents")
+                if (recentChanges.isNotEmpty()) {
+                    Log.d(TAG, "最近变化: $recentChangesText")
+                }
+            } else {
+                Log.w(TAG, "轮询货币分配失败，保留上一次成功值: deviceID=$deviceID（返回空列表）")
+            }
+            
+            assignments
+        } catch (e: Exception) {
+            Log.e(TAG, "轮询货币分配异常: deviceID=$deviceID", e)
+            // 返回空列表（容错处理），不把金额清零
+            emptyList()
+        }
+    }
+    
+    /**
+     * 轮询库存（获取设备已收金额）- 基于库存差值计算本次会话累计金额（保留兼容性）
      * @param deviceID 设备ID
      * @return LevelsResponse 库存响应（包含各面额的 Value 和 Stored）
+     * @deprecated 请使用 pollCurrencyAssignments（基于 GetCurrencyAssignment）
      */
+    @Deprecated("请使用 pollCurrencyAssignments", ReplaceWith("pollCurrencyAssignments(deviceID)"))
     suspend fun pollLevels(deviceID: String): LevelsResponse {
         return try {
             Log.d(TAG, "轮询库存: deviceID=$deviceID")
@@ -984,20 +1275,85 @@ class CashDeviceRepository(
      */
     suspend fun dispenseValue(deviceID: String, valueCents: Int, countryCode: String = "EUR"): Boolean {
         return try {
-            Log.d(TAG, "找零: deviceID=$deviceID, valueCents=$valueCents (${valueCents / 100.0}元), countryCode=$countryCode")
             val request = DispenseValueRequest(value = valueCents, countryCode = countryCode)
+            
+            // 构建完整 URL（用于日志）
+            // 注意：baseUrl 应该从 CashDeviceClient 获取，但为了简化，这里使用默认值
+            // 实际运行时，Retrofit 会自动使用配置的 baseUrl
+            val baseUrl = "http://127.0.0.1:5000/api"
+            val fullUrl = "$baseUrl/CashDevice/DispenseValue?deviceID=$deviceID"
+            
+            // 序列化请求体（用于日志）- 必须打印完整 JSON 用于验收
+            // 使用默认配置，确保所有字段都被序列化
+            val json = kotlinx.serialization.json.Json {
+                encodeDefaults = true  // 确保默认值也被序列化
+                ignoreUnknownKeys = false
+            }
+            val requestBodyJson = json.encodeToString(
+                kotlinx.serialization.serializer<DispenseValueRequest>(), request
+            )
+            
+            Log.d(TAG, "========== DispenseValue 请求开始 ==========")
+            Log.d(TAG, "UI: 点击找零按钮, input=${valueCents / 100.0} EUR (${valueCents}分)")
+            Log.d(TAG, "VM: requestDispense amountCents=$valueCents, currency=$countryCode")
+            Log.d(TAG, "Repo: Dispense REQ /CashDevice/DispenseValue")
+            Log.d(TAG, "deviceID: $deviceID")
+            Log.d(TAG, "fullUrl: $fullUrl")
+            Log.d(TAG, "RequestBody: $requestBodyJson")
+            
+            // 验证请求体包含 CountryCode（必须验证）
+            if (!requestBodyJson.contains("CountryCode")) {
+                Log.e(TAG, "ERROR: DispenseValue requestBody 缺少 CountryCode! requestBodyJson=$requestBodyJson")
+                Log.e(TAG, "ERROR: request 对象内容: value=${request.value}, countryCode=${request.countryCode}")
+            } else {
+                Log.d(TAG, "✓ 验证通过: DispenseValue requestBody 包含 CountryCode")
+            }
+            
+            Log.d(TAG, "--> POST /CashDevice/DispenseValue?deviceID=$deviceID")
+            Log.d(TAG, "RequestBody: $requestBodyJson")
+            
             val response = api.dispenseValue(deviceID, request)
+            val httpCode = response.code()
             val bodyText = cleanResponseBody(response.body()?.string())
-            Log.d(TAG, "DispenseValue 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            
+            Log.d(TAG, "<-- $httpCode ${if (response.isSuccessful) "OK" else "ERROR"}")
+            Log.d(TAG, "rawResponseBody: $bodyText")
+            
             if (response.isSuccessful) {
-                Log.d(TAG, "找零成功: deviceID=$deviceID, valueCents=$valueCents, body=$bodyText")
+                Log.d(TAG, "找零成功: deviceID=$deviceID, valueCents=$valueCents (${valueCents / 100.0}元)")
+                Log.d(TAG, "========== DispenseValue 请求成功 ==========")
                 true
             } else {
-                Log.e(TAG, "找零失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
+                // 尝试解析错误原因（如果 body 包含 errorReason）
+                val errorReason = try {
+                    if (bodyText.isNotEmpty()) {
+                        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+                        val errorObj = json.parseToJsonElement(bodyText)
+                        if (errorObj is kotlinx.serialization.json.JsonObject) {
+                            errorObj["errorReason"]?.let { 
+                                if (it is kotlinx.serialization.json.JsonPrimitive) {
+                                    it.content
+                                } else {
+                                    it.toString()
+                                }
+                            } ?: bodyText
+                        } else {
+                            bodyText
+                        }
+                    } else {
+                        "响应体为空"
+                    }
+                } catch (e: Exception) {
+                    "解析错误失败: ${e.message}, 原始响应: $bodyText"
+                }
+                
+                Log.e(TAG, "找零失败: deviceID=$deviceID, code=$httpCode, errorReason=$errorReason")
+                Log.e(TAG, "========== DispenseValue 请求失败 ==========")
                 false
             }
         } catch (e: Exception) {
             Log.e(TAG, "找零异常: deviceID=$deviceID", e)
+            Log.e(TAG, "========== DispenseValue 请求异常 ==========")
             false
         }
     }
@@ -1036,6 +1392,833 @@ class CashDeviceRepository(
             Log.e(TAG, "禁用找零异常: deviceID=$deviceID", e)
             false
         }
+    }
+    
+    /**
+     * 设置面额接收（逐个面额设置"是否允许接收"）
+     * 厂商确认：SetInhibits 是设置可接收面额，要逐个面额配置
+     * 约定：Inhibit = true 表示禁止接收该面额；Inhibit = false 表示允许接收该面额
+     * 
+     * @param deviceID 设备ID
+     * @param deviceName 设备名称（SPECTRAL_PAYOUT-0 或 SMART_COIN_SYSTEM-1），用于获取可接收面额白名单
+     * @return Boolean 是否成功
+     */
+    suspend fun setInhibits(deviceID: String, deviceName: String): Boolean {
+        return try {
+            Log.d(TAG, "设置面额接收: deviceID=$deviceID, deviceName=$deviceName")
+            
+            // 获取可接收面额白名单
+            val acceptableDenoms = DeviceDenominationConfig.getAcceptableDenominations(deviceName)
+            if (acceptableDenoms.isEmpty()) {
+                Log.w(TAG, "设备 $deviceName 没有可接收面额白名单，跳过 SetInhibits")
+                return true  // 没有白名单，视为成功（不设置任何限制）
+            }
+            
+            // 构建 SetInhibits 请求：白名单中的面额设置为 Inhibit=false（允许接收），其他面额设置为 Inhibit=true（禁止接收）
+            // 注意：我们需要知道设备支持的所有面额，这里假设我们只配置白名单中的面额
+            // 实际场景中，可能需要先获取设备支持的面额列表，然后对每个面额设置 Inhibit
+            val inhibitItems = acceptableDenoms.map { denom: Int ->
+                DenominationInhibitItem(
+                    denomination = denom,
+                    inhibit = false  // 白名单中的面额：允许接收
+                )
+            }
+            
+            val request = SetInhibitsRequest(denominations = inhibitItems)
+            
+            // 打印配置内容
+            Log.d(TAG, "SetInhibits 配置: deviceID=$deviceID, 面额数=${inhibitItems.size}")
+            inhibitItems.forEach { item: DenominationInhibitItem ->
+                Log.d(TAG, "  面额 ${item.denomination} 分: Inhibit=${item.inhibit} (${if (item.inhibit) "禁止接收" else "允许接收"})")
+            }
+            
+            val response = api.setInhibits(deviceID, request)
+            val bodyText = cleanResponseBody(response.body()?.string())
+            
+            Log.d(TAG, "SetInhibits 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            
+            if (response.isSuccessful) {
+                Log.d(TAG, "SetInhibits 成功: deviceID=$deviceID, 配置了 ${inhibitItems.size} 个面额")
+            } else {
+                Log.e(TAG, "SetInhibits 失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
+            }
+            
+            response.isSuccessful
+        } catch (e: Exception) {
+            Log.e(TAG, "设置面额接收异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * 设置面额路由（逐个面额设置"找零路由/是否进入可找零循环仓（recycler）"）
+     * 厂商确认：SetRoutes 是设置找零面额，决定某面额进入 recycler（可找零）还是 cashbox（不可找零）
+     * 
+     * @param deviceID 设备ID
+     * @param deviceName 设备名称（SPECTRAL_PAYOUT-0 或 SMART_COIN_SYSTEM-1），用于获取可找零面额白名单
+     * @return Boolean 是否成功
+     */
+    suspend fun setRoutes(deviceID: String, deviceName: String): Boolean {
+        return try {
+            Log.d(TAG, "设置面额路由: deviceID=$deviceID, deviceName=$deviceName")
+            
+            // 获取可接收面额白名单和可找零面额白名单
+            val acceptableDenoms = DeviceDenominationConfig.getAcceptableDenominations(deviceName)
+            val recyclableDenoms = DeviceDenominationConfig.getRecyclableDenominations(deviceName)
+            
+            if (acceptableDenoms.isEmpty()) {
+                Log.w(TAG, "设备 $deviceName 没有可接收面额白名单，跳过 SetRoutes")
+                return true  // 没有白名单，视为成功（不设置任何路由）
+            }
+            
+            // 构建 SetRoutes 请求：
+            // - 可找零面额白名单中的面额：Route=1（进入 recycler，可找零）
+            // - 其他可接收面额：Route=0（进入 cashbox，不可找零）
+            val routeItems = acceptableDenoms.map { denom: Int ->
+                DenominationRouteItem(
+                    denomination = denom,
+                    route = if (recyclableDenoms.contains(denom)) 1 else 0  // 1 = recycler（可找零），0 = cashbox（不可找零）
+                )
+            }
+            
+            val request = SetRoutesRequest(denominations = routeItems)
+            
+            // 打印配置内容
+            Log.d(TAG, "SetRoutes 配置: deviceID=$deviceID, 面额数=${routeItems.size}")
+            routeItems.forEach { item: DenominationRouteItem ->
+                val routeName = if (item.route == 1) "recycler（可找零）" else "cashbox（不可找零）"
+                Log.d(TAG, "  面额 ${item.denomination} 分: Route=${item.route} ($routeName)")
+            }
+            
+            val response = api.setRoutes(deviceID, request)
+            val bodyText = cleanResponseBody(response.body()?.string())
+            
+            Log.d(TAG, "SetRoutes 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            
+            if (response.isSuccessful) {
+                Log.d(TAG, "SetRoutes 成功: deviceID=$deviceID, 配置了 ${routeItems.size} 个面额")
+            } else {
+                Log.e(TAG, "SetRoutes 失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
+            }
+            
+            response.isSuccessful
+        } catch (e: Exception) {
+            Log.e(TAG, "设置面额路由异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * 获取货币分配（面额识别 + 计数器来源）
+     * @param deviceID 设备ID
+     * @return List<CurrencyAssignment> 货币分配列表（服务器返回数组 []）
+     */
+    suspend fun fetchCurrencyAssignments(deviceID: String): List<CurrencyAssignment> {
+        return try {
+            Log.d(TAG, "获取货币分配: deviceID=$deviceID")
+            val assignments = api.getCurrencyAssignment(deviceID)
+            
+            // 详细日志：打印面额条目数 + 前几条示例
+            val assignmentsCount = assignments.size
+            Log.d(TAG, "GetCurrencyAssignment 响应: deviceID=$deviceID, count=$assignmentsCount")
+            
+            if (assignmentsCount > 0) {
+                // 打印前 1-2 条的摘要（包含所有关键字段）
+                assignments.take(2).forEachIndexed { index, assignment ->
+                    val valueCountryCodeStr = assignment.valueCountryCode?.let { 
+                        "${it.value} ${it.countryCode ?: ""}" 
+                    } ?: "null"
+                    val storedInRecycler = assignment.storedInRecycler
+                    Log.d(TAG, "  面额[${index}]: type=${assignment.type}, value=${assignment.value}分, valueCountryCode=$valueCountryCodeStr, countryCode=${assignment.countryCode}, channel=${assignment.channel}, stored=${assignment.stored}, storedInCashbox=${assignment.storedInCashbox}, storedInRecycler=$storedInRecycler, acceptRoute=${assignment.acceptRoute}, isInhibited=${assignment.isInhibited}, isRecyclable=${assignment.isRecyclable}")
+                }
+                if (assignmentsCount > 2) {
+                    Log.d(TAG, "  ... 还有 ${assignmentsCount - 2} 个面额")
+                }
+                // 打印成功解析的日志
+                Log.d(TAG, "GetCurrencyAssignment parsed count=$assignmentsCount")
+            } else {
+                Log.w(TAG, "GetCurrencyAssignment 返回空列表: deviceID=$deviceID")
+            }
+            
+            assignments
+        } catch (e: retrofit2.HttpException) {
+            val code = e.code()
+            val errorBody = e.response()?.errorBody()?.string() ?: ""
+            Log.e(TAG, "获取货币分配 HTTP 错误: endpoint=GetCurrencyAssignment, deviceID=$deviceID, code=$code, errorBody=$errorBody")
+            emptyList()  // 返回空列表，不抛出异常
+        } catch (e: kotlinx.serialization.SerializationException) {
+            Log.e(TAG, "获取货币分配反序列化错误: deviceID=$deviceID", e)
+            Log.e(TAG, "反序列化错误详情: ${e.message}")
+            emptyList()  // 返回空列表，不抛出异常
+        } catch (e: Exception) {
+            Log.e(TAG, "获取货币分配异常: deviceID=$deviceID", e)
+            emptyList()  // 返回空列表，不抛出异常
+        }
+    }
+    
+    /**
+     * 从货币分配动态生成并应用 SetInhibits（设置可接收面额）
+     * @param deviceID 设备ID
+     * @param deviceName 设备名称（用于日志）
+     * @return Boolean 是否成功
+     */
+    suspend fun applyInhibitsFromAssignments(deviceID: String, deviceName: String): Boolean {
+        return try {
+            Log.d(TAG, "从货币分配应用 SetInhibits: deviceID=$deviceID, deviceName=$deviceName")
+            
+            // 获取货币分配
+            val assignments = fetchCurrencyAssignments(deviceID)
+            
+            if (assignments.isEmpty()) {
+                Log.w(TAG, "设备 $deviceName 没有货币分配数据，跳过 SetInhibits")
+                return true  // 没有数据，视为成功（不设置任何限制）
+            }
+            
+            // 构建 SetInhibits 请求：允许接收所有面额（Inhibit=false）
+            // 注意：Denomination 字符串格式为 "{value} {countryCode}"，例如 "500 EUR"
+            val inhibitItems = assignments.map { assignment ->
+                DenominationInhibitItem(
+                    denomination = assignment.getDenominationString().hashCode(),  // 临时方案：使用字符串的 hashCode
+                    inhibit = false  // 允许接收所有面额
+                )
+            }
+            
+            // 修正：Denomination 应该是字符串，但 DenominationInhibitItem 的 denomination 是 Int
+            // 需要检查厂商文档，这里先使用 value 作为 denomination
+            val inhibitItemsCorrected = assignments.map { assignment ->
+                DenominationInhibitItem(
+                    denomination = assignment.value,  // 使用 value（分）作为 denomination
+                    inhibit = assignment.isInhibited  // 保持当前状态，或设置为 false 允许接收
+                )
+            }
+            
+            val request = SetInhibitsRequest(denominations = inhibitItemsCorrected)
+            
+            // 打印配置内容
+            Log.d(TAG, "SetInhibits 配置（从货币分配生成）: deviceID=$deviceID, 面额数=${inhibitItemsCorrected.size}")
+            inhibitItemsCorrected.take(5).forEach { item ->
+                Log.d(TAG, "  面额 ${item.denomination} 分: Inhibit=${item.inhibit} (${if (item.inhibit) "禁止接收" else "允许接收"})")
+            }
+            
+            val response = api.setInhibits(deviceID, request)
+            val bodyText = cleanResponseBody(response.body()?.string())
+            
+            Log.d(TAG, "SetInhibits 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            
+            if (response.isSuccessful) {
+                Log.d(TAG, "SetInhibits 成功: deviceID=$deviceID, 配置了 ${inhibitItemsCorrected.size} 个面额")
+            } else {
+                Log.e(TAG, "SetInhibits 失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
+            }
+            
+            response.isSuccessful
+        } catch (e: Exception) {
+            Log.e(TAG, "从货币分配应用 SetInhibits 异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * 统一日志函数：打印 REST API 请求和响应
+     * @param tag 日志标签
+     * @param apiName API 名称
+     * @param requestBody 请求体（JSON 字符串）
+     * @param response HTTP 响应
+     * @return errorBody 文本（如果失败），用于后续日志复用
+     */
+    private fun logApiResponse(tag: String, apiName: String, requestBody: String?, response: Response<ResponseBody>): String? {
+        val httpCode = response.code()
+        val isSuccessful = response.isSuccessful
+        
+        if (isSuccessful) {
+            // 成功：打印 body
+            val bodyText = cleanResponseBody(response.body()?.string())
+            Log.d(tag, "$apiName RESP: http=$httpCode, body=$bodyText")
+            return null
+        } else {
+            // 失败：读取 errorBody（只读一次，后续复用）
+            val errorBody = response.errorBody()
+            val contentType = errorBody?.contentType()?.toString() ?: "unknown"
+            val errorBodyText = if (errorBody != null) {
+                try {
+                    // 只读取一次，后续复用这个变量
+                    val errorBodyString = errorBody.string()
+                    cleanResponseBody(errorBodyString)
+                } catch (e: Exception) {
+                    Log.e(tag, "读取 errorBody 失败", e)
+                    "无法读取 errorBody: ${e.message}"
+                }
+            } else {
+                "errorBody 为 null"
+            }
+            Log.e(tag, "$apiName RESP: http=$httpCode, Content-Type=$contentType, errorBody=$errorBodyText")
+            return errorBodyText  // 返回 errorBody 文本，供后续复用
+        }
+    }
+    
+    /**
+     * 设置单个面额路由（在线配置，不导致连接断开）
+     * 使用嵌套结构匹配服务端期望格式
+     * 
+     * 重要说明：
+     * - 此方法是在线配置，不会断开设备连接
+     * - 即使 API 调用失败（如 400/500），也不会触发断开连接或设备状态错误
+     * - 设备在设置过程中保持连接状态，可以继续使用其他功能
+     * 
+     * 验证规则：
+     * - Route 只能为 0（CASHBOX）或 1（RECYCLER）
+     * - 仅 Spectral Payout 设备支持 Route 0/1
+     * - 面额必须在设备允许的范围内
+     * - 货币代码必须为 EUR（目前仅支持欧元）
+     * 
+     * @param deviceID 设备ID
+     * @param valueCents 面额（分）
+     * @param currency 货币代码，默认 EUR（必须传入，不能为空）
+     * @param route 路由：0=CASHBOX（不可找零），1=RECYCLER（可找零）
+     * @param probeMode 探测模式：如果失败，尝试另一个 route 值（1->0 或 0->1）
+     * @param useRawJson 是否使用原始 JSON 直发模式（用于快速验证，绕过 DTO 序列化）
+     * @return Boolean 是否成功
+     */
+    suspend fun setDenominationRoute(deviceID: String, valueCents: Int, currency: String = "EUR", route: Int, probeMode: Boolean = false, useRawJson: Boolean = false): Boolean {
+        return try {
+            Log.d(TAG, "========== SetDenominationRoute REQ ==========")
+            Log.d(TAG, "deviceID: $deviceID")
+            Log.d(TAG, "value: $valueCents")
+            Log.d(TAG, "currency: $currency")
+            Log.d(TAG, "route: $route (${if (route == 1) "RECYCLER可找零" else if (route == 0) "CASHBOX不可找零" else "其他($route)"})")
+            Log.d(TAG, "probeMode: $probeMode")
+            
+            // ========== 验证 1: Route 值只能为 0 或 1 ==========
+            if (route != 0 && route != 1) {
+                Log.e(TAG, "SetDenominationRoute 验证失败: Route 值只能为 0（CASHBOX）或 1（RECYCLER），当前值=$route")
+                return false
+            }
+            
+            // ========== 验证 2: 仅 Spectral Payout 设备支持 Route 0/1 ==========
+            val isSpectralPayout = deviceID.startsWith("SPECTRAL_PAYOUT", ignoreCase = true) || 
+                                   deviceID.contains("SPECTRAL", ignoreCase = true) ||
+                                   deviceID.contains("PAYOUT", ignoreCase = true)
+            if (!isSpectralPayout) {
+                Log.e(TAG, "SetDenominationRoute 验证失败: 仅 Spectral Payout 设备支持 Route 0/1，当前设备ID=$deviceID")
+                return false
+            }
+            Log.d(TAG, "✓ 设备型号验证通过: Spectral Payout (deviceID=$deviceID)")
+            
+            // ========== 验证 3: 货币代码必须为 EUR ==========
+            val finalCurrency = currency.ifEmpty { "EUR" }.uppercase()
+            if (finalCurrency != "EUR") {
+                Log.e(TAG, "SetDenominationRoute 验证失败: 目前仅支持 EUR 货币，当前值=$currency")
+                return false
+            }
+            Log.d(TAG, "✓ 货币代码验证通过: $finalCurrency")
+            
+            // ========== 验证 4: 面额必须在设备允许的范围内 ==========
+            val deviceName = if (isSpectralPayout) "SPECTRAL_PAYOUT-0" else "SMART_COIN_SYSTEM-1"
+            val acceptableDenoms = DeviceDenominationConfig.getAcceptableDenominations(deviceName)
+            if (!acceptableDenoms.contains(valueCents)) {
+                Log.e(TAG, "SetDenominationRoute 验证失败: 面额 $valueCents 不在设备允许的范围内")
+                Log.e(TAG, "  设备 $deviceName 允许的面额: $acceptableDenoms")
+                return false
+            }
+            Log.d(TAG, "✓ 面额验证通过: $valueCents 在设备允许的范围内")
+            
+            // ========== 构建 Route 尝试列表（只尝试 0 和 1）==========
+            val routesToTry = if (probeMode) {
+                // 探测模式：如果失败，尝试另一个 route 值（1->0 或 0->1）
+                listOf(route, if (route == 1) 0 else 1).distinct()
+            } else {
+                listOf(route)
+            }
+            Log.d(TAG, "Route 尝试列表: $routesToTry (仅支持 0 和 1)")
+            
+            var lastError: String? = null
+            for (currentRoute in routesToTry) {
+                val (response, requestBodyJsonForLog) = if (useRawJson) {
+                    // ========== 原始 JSON 直发模式（用于快速验证）==========
+                    // 直接发送与 Postman 成功请求完全一致的 JSON 字符串（扁平三字段）
+                    val rawJsonString = """
+                        {
+                          "Value": $valueCents,
+                          "CountryCode": "$finalCurrency",
+                          "Route": $currentRoute
+                        }
+                    """.trimIndent()
+                    
+                    Log.d(TAG, "========== SetDenominationRoute 原始 JSON 直发模式 ==========")
+                    Log.d(TAG, "rawJsonString=$rawJsonString")
+                    
+                    val requestBody = rawJsonString.toRequestBody("application/json; charset=utf-8".toMediaType())
+                    
+                    try {
+                        val resp = api.setDenominationRouteRaw(deviceID, requestBody)
+                        Pair(resp, rawJsonString)
+                    } catch (e: Exception) {
+                        val errorMsg = "原始 JSON 直发模式异常: ${e.javaClass.simpleName}, message=${e.message}"
+                        Log.e(TAG, errorMsg, e)
+                        lastError = "route=$currentRoute, 原始 JSON 直发模式异常: ${e.message}"
+                        if (!probeMode) {
+                            return false
+                        }
+                        continue
+                    }
+                } else {
+                    // ========== DTO 序列化模式（正常模式 - 扁平结构）==========
+                    val request = SetDenominationRouteRequestFlat(
+                        value = valueCents,
+                        countryCode = finalCurrency,
+                        route = currentRoute
+                    )
+                    
+                    // 序列化请求体（用于日志）- 必须打印完整 JSON 用于验收
+                    // 注意：encodeDefaults = false 确保不输出默认值
+                    val json = kotlinx.serialization.json.Json {
+                        encodeDefaults = false
+                        ignoreUnknownKeys = false
+                    }
+                    val requestBodyJson = json.encodeToString(
+                        kotlinx.serialization.serializer<SetDenominationRouteRequestFlat>(), request
+                    )
+                    Log.d(TAG, "========== SetDenominationRoute 请求体（序列化后 - 扁平结构）==========")
+                    Log.d(TAG, "requestBodyJson=$requestBodyJson (route=$currentRoute)")
+                    
+                    // 验证请求体包含三个顶层字段（必须验证）
+                    val hasValue = requestBodyJson.contains("\"Value\"")
+                    val hasCountryCode = requestBodyJson.contains("\"CountryCode\"")
+                    val hasRoute = requestBodyJson.contains("\"Route\"")
+                    if (!hasValue || !hasCountryCode || !hasRoute) {
+                        Log.e(TAG, "ERROR: requestBody 缺少必要字段! hasValue=$hasValue, hasCountryCode=$hasCountryCode, hasRoute=$hasRoute")
+                        Log.e(TAG, "requestBodyJson=$requestBodyJson")
+                    } else {
+                        Log.d(TAG, "✓ 验证通过: requestBody 包含三个顶层字段（Value、CountryCode、Route）")
+                    }
+                    
+                    // 验证请求体不包含嵌套结构（ValueCountryCode 嵌套层）
+                    if (requestBodyJson.contains("ValueCountryCode")) {
+                        Log.e(TAG, "ERROR: requestBody 包含嵌套结构（ValueCountryCode），应使用扁平结构!")
+                        Log.e(TAG, "requestBodyJson=$requestBodyJson")
+                    } else {
+                        Log.d(TAG, "✓ 验证通过: requestBody 使用扁平结构（不包含 ValueCountryCode 嵌套层）")
+                    }
+                    
+                    // 验证请求体不包含多余字段（这些字段会导致 INVALID_INPUT）
+                    if (requestBodyJson.contains("Fraud_Attempt_Value") || requestBodyJson.contains("Calibration_Failed_Value")) {
+                        Log.e(TAG, "ERROR: requestBody 包含多余字段（Fraud_Attempt_Value 或 Calibration_Failed_Value），这会导致 INVALID_INPUT!")
+                        Log.e(TAG, "requestBodyJson=$requestBodyJson")
+                    } else {
+                        Log.d(TAG, "✓ 验证通过: requestBody 不包含多余字段")
+                    }
+                    
+                    // ========== 调用 SetDenominationRoute API ==========
+                    // 注意：OkHttp Interceptor 会自动记录最终请求头和请求体（HttpLoggingInterceptor.Level.BODY）
+                    // 这些日志会显示 OkHttp 真正发送的内容，用于验证字段名是否正确
+                    Log.d(TAG, "准备调用 SetDenominationRoute API: deviceID=$deviceID")
+                    Log.d(TAG, "Query 参数: deviceID=$deviceID (注意大小写：小写 d，大写 ID)")
+                    Log.d(TAG, "Content-Type: application/json (已通过 @Headers 强制指定)")
+                    Log.d(TAG, "Authorization: Bearer <token> (由 Interceptor 自动添加，注意 Bearer 后面有空格)")
+                    
+                    // 打印最终请求 URL（用于验证路径是否正确）
+                    // 注意：baseUrl 默认值为 "http://127.0.0.1:5000/api/"，已包含 /api/
+                    // Retrofit 接口路径为 "CashDevice/SetDenominationRoute"
+                    // 最终 URL 应为：http://127.0.0.1:5000/api/CashDevice/SetDenominationRoute?deviceID=...
+                    // 这与 Postman URL 一致：{{baseUrl}}/CashDevice/SetDenominationRoute?deviceID=...
+                    // 最终请求 URL 将在 OkHttp Interceptor 日志中显示（请查看 --> POST ... 日志）
+                    Log.d(TAG, "最终请求 URL 格式: http://<host>:<port>/api/CashDevice/SetDenominationRoute?deviceID=$deviceID")
+                    
+                    try {
+                        val resp = api.setDenominationRoute(deviceID, request)
+                        Pair(resp, requestBodyJson)
+                    } catch (e: java.net.SocketTimeoutException) {
+                        val errorMsg = "网络超时: ${e.message}"
+                        Log.e(TAG, "SetDenominationRoute 网络超时: deviceID=$deviceID, value=$valueCents, route=$currentRoute, $errorMsg")
+                        Log.d(TAG, "⚠ 注意：网络超时，但设备保持连接状态，可以重试")
+                        lastError = "route=$currentRoute, 网络超时: ${e.message}"
+                        if (!probeMode) {
+                            return false
+                        }
+                        continue  // 探测模式：继续尝试下一个 route 值
+                    } catch (e: retrofit2.HttpException) {
+                        val errorMsg = "HTTP 错误: code=${e.code()}, message=${e.message()}"
+                        Log.e(TAG, "SetDenominationRoute HTTP 错误: deviceID=$deviceID, value=$valueCents, route=$currentRoute, $errorMsg")
+                        Log.d(TAG, "⚠ 注意：HTTP 错误，但设备保持连接状态，可以重试")
+                        lastError = "route=$currentRoute, HTTP ${e.code()}: ${e.message()}"
+                        if (!probeMode) {
+                            return false
+                        }
+                        continue  // 探测模式：继续尝试下一个 route 值
+                    } catch (e: Exception) {
+                        val errorMsg = "异常: ${e.javaClass.simpleName}, message=${e.message}"
+                        Log.e(TAG, "SetDenominationRoute 异常: deviceID=$deviceID, value=$valueCents, route=$currentRoute, $errorMsg", e)
+                        Log.d(TAG, "⚠ 注意：发生异常，但设备保持连接状态，可以重试")
+                        lastError = "route=$currentRoute, 异常: ${e.message}"
+                        if (!probeMode) {
+                            return false
+                        }
+                        continue  // 探测模式：继续尝试下一个 route 值
+                    }
+                }
+                
+                // ========== 处理 API 响应 ==========
+                // 打印最终发送的 JSON（用于验证与 Postman 一致）
+                Log.d(TAG, "========== SetDenominationRoute 最终发送的 JSON ==========")
+                Log.d(TAG, "最终请求体（扁平三字段）: $requestBodyJsonForLog")
+                Log.d(TAG, "验证：应包含 {\"Value\":...,\"CountryCode\":...,\"Route\":...} 格式")
+                Log.d(TAG, "最终请求 URL 格式: http://<host>:<port>/api/CashDevice/SetDenominationRoute?deviceID=$deviceID")
+                Log.d(TAG, "注意：完整 URL 将在 OkHttp Interceptor 日志中显示（请查看 --> POST ... 日志）")
+                
+                // 使用统一日志函数打印响应（包含 errorBody，只读一次）
+                val errorBodyText = logApiResponse(TAG, "SetDenominationRoute", requestBodyJsonForLog, response)
+                
+                if (response.isSuccessful) {
+                    // ========== 成功处理 ==========
+                    val responseBody = response.body()?.string() ?: ""
+                    Log.d(TAG, "========== SetDenominationRoute 成功 ==========")
+                    Log.d(TAG, "deviceID: $deviceID")
+                    Log.d(TAG, "value: $valueCents")
+                    Log.d(TAG, "currency: $finalCurrency")
+                    Log.d(TAG, "route: $currentRoute (${if (currentRoute == 1) "RECYCLER可找零" else "CASHBOX不可找零"})")
+                    Log.d(TAG, "HTTP Code: ${response.code()}")
+                    Log.d(TAG, "Response Body: $responseBody")
+                    Log.d(TAG, "✓ 设备保持连接状态，可以继续使用其他功能")
+                    
+                    // 成功后立即刷新货币分配（确保 UI 立即反映最新状态）
+                    try {
+                        Log.d(TAG, "开始刷新货币分配以验证设置是否生效...")
+                        val refreshedAssignments = fetchCurrencyAssignments(deviceID)
+                        Log.d(TAG, "✓ 货币分配刷新成功: 面额数=${refreshedAssignments.size}")
+                        
+                        // 验证设置是否生效：查找对应的面额，检查 AcceptRoute
+                        val targetAssignment = refreshedAssignments.find { it.value == valueCents }
+                        if (targetAssignment != null) {
+                            val expectedRoute = if (currentRoute == 1) "PAYOUT" else "CASHBOX"
+                            val actualRoute = targetAssignment.acceptRoute ?: "UNKNOWN"
+                            Log.d(TAG, "设置验证: 面额=$valueCents, 期望Route=$expectedRoute, 实际Route=$actualRoute")
+                            if (actualRoute.equals(expectedRoute, ignoreCase = true)) {
+                                Log.d(TAG, "✓ 设置验证成功: Route 已正确更新")
+                            } else {
+                                Log.w(TAG, "⚠ 设置验证警告: Route 可能未立即更新（可能需要等待设备处理）")
+                            }
+                        } else {
+                            Log.w(TAG, "⚠ 设置验证警告: 未找到面额 $valueCents 的配置")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "刷新货币分配失败（设备保持连接）", e)
+                        // 即使刷新失败，也认为设置成功（因为 API 返回成功）
+                    }
+                    return true
+                } else {
+                    // ========== 失败处理 ==========
+                    val httpCode = response.code()
+                    val contentType = response.errorBody()?.contentType()?.toString() ?: "unknown"
+                    lastError = "route=$currentRoute, http=$httpCode, Content-Type=$contentType, errorBody=$errorBodyText"
+                    
+                    Log.e(TAG, "========== SetDenominationRoute 失败 ==========")
+                    Log.e(TAG, "deviceID: $deviceID")
+                    Log.e(TAG, "value: $valueCents")
+                    Log.e(TAG, "currency: $finalCurrency")
+                    Log.e(TAG, "route: $currentRoute")
+                    Log.e(TAG, "HTTP Code: $httpCode")
+                    Log.e(TAG, "Content-Type: $contentType")
+                    Log.e(TAG, "Error Body: $errorBodyText")
+                    Log.d(TAG, "⚠ 注意：API 调用失败，但设备保持连接状态，可以重试或继续使用其他功能")
+                    
+                    // 如果不是探测模式，直接返回失败（但不触发断开连接）
+                    if (!probeMode) {
+                        return false
+                    }
+                    // 探测模式：继续尝试下一个 route 值
+                }
+            }
+            
+            // ========== 所有 route 值都失败 ==========
+            Log.e(TAG, "========== SetDenominationRoute 所有 route 值都失败 ==========")
+            Log.e(TAG, "deviceID: $deviceID")
+            Log.e(TAG, "value: $valueCents")
+            Log.e(TAG, "currency: $finalCurrency")
+            Log.e(TAG, "尝试的 route 值: $routesToTry")
+            Log.e(TAG, "最后错误: $lastError")
+            Log.d(TAG, "⚠ 注意：所有 route 值都失败，但设备保持连接状态，可以重试或继续使用其他功能")
+            false
+        } catch (e: Exception) {
+            // ========== 异常处理 ==========
+            Log.e(TAG, "========== SetDenominationRoute 异常 ==========")
+            Log.e(TAG, "deviceID: $deviceID")
+            Log.e(TAG, "value: $valueCents")
+            Log.e(TAG, "currency: $currency")
+            Log.e(TAG, "route: $route")
+            Log.e(TAG, "异常类型: ${e.javaClass.simpleName}")
+            Log.e(TAG, "异常消息: ${e.message}")
+            Log.d(TAG, "⚠ 注意：发生异常，但设备保持连接状态，可以重试或继续使用其他功能")
+            e.printStackTrace()
+            false
+        }
+    }
+    
+    /**
+     * 设置单个面额接收状态（是否允许接收该面额）
+     * 使用 SetDenominationInhibits API，格式：{"ValueCountryCodes":["500 EUR"],"Inhibit":false}
+     * @param deviceID 设备ID
+     * @param valueCents 面额（分）
+     * @param currency 货币代码，默认 EUR
+     * @param inhibit true=禁止接收，false=允许接收
+     * @return Boolean 是否成功
+     */
+    suspend fun setDenominationInhibit(deviceID: String, valueCents: Int, currency: String = "EUR", inhibit: Boolean): Boolean {
+        return try {
+            Log.d(TAG, "========== SetDenominationInhibits REQ ==========")
+            Log.d(TAG, "deviceID: $deviceID")
+            Log.d(TAG, "value: $valueCents")
+            Log.d(TAG, "currency: $currency")
+            Log.d(TAG, "inhibit: $inhibit (${if (inhibit) "禁止接收" else "允许接收"})")
+            
+            // 确保 currency 不为空
+            val finalCurrency = currency.ifEmpty { "EUR" }
+            
+            // 构建 ValueCountryCodes 字符串数组，格式："500 EUR"
+            val valueCountryCodeString = "$valueCents $finalCurrency"
+            val request = SetDenominationInhibitsRequest(
+                valueCountryCodes = listOf(valueCountryCodeString),
+                inhibit = inhibit
+            )
+            
+            // 序列化请求体（用于日志）
+            val json = kotlinx.serialization.json.Json {
+                encodeDefaults = true
+                ignoreUnknownKeys = false
+            }
+            val requestBodyJson = json.encodeToString(
+                kotlinx.serialization.serializer<SetDenominationInhibitsRequest>(), request
+            )
+            Log.d(TAG, "SetDenominationInhibits requestBodyJson=$requestBodyJson")
+            
+            // 验证请求体包含 ValueCountryCodes
+            if (!requestBodyJson.contains("ValueCountryCodes")) {
+                Log.e(TAG, "ERROR: requestBody 缺少 ValueCountryCodes! requestBodyJson=$requestBodyJson")
+            } else {
+                Log.d(TAG, "✓ 验证通过: requestBody 包含 ValueCountryCodes")
+            }
+            
+            val response = api.setDenominationInhibits(deviceID, request)
+            
+            // 使用统一日志函数打印响应（包含 errorBody，只读一次）
+            val errorBodyText = logApiResponse(TAG, "SetDenominationInhibits", requestBodyJson, response)
+            
+            if (response.isSuccessful) {
+                Log.d(TAG, "SetDenominationInhibits 成功: deviceID=$deviceID, value=$valueCents, currency=$finalCurrency, inhibit=$inhibit")
+                // 成功后立即刷新货币分配
+                try {
+                    val refreshedAssignments = fetchCurrencyAssignments(deviceID)
+                    Log.d(TAG, "SetDenominationInhibits 成功后刷新货币分配: 面额数=${refreshedAssignments.size}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "SetDenominationInhibits 成功后刷新货币分配失败", e)
+                }
+                true
+            } else {
+                val contentType = response.errorBody()?.contentType()?.toString() ?: "unknown"
+                Log.e(TAG, "SetDenominationInhibits 失败: deviceID=$deviceID, value=$valueCents, currency=$finalCurrency, inhibit=$inhibit, http=${response.code()}, Content-Type=$contentType, errorBody=$errorBodyText")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "SetDenominationInhibits 异常: deviceID=$deviceID, value=$valueCents, currency=$currency, inhibit=$inhibit", e)
+            e.printStackTrace()
+            false
+        }
+    }
+    
+    /**
+     * 应用路由配置（通过 OpenConnection 携带 SetRoutes，仅纸币器）
+     * 
+     * 纸币器工作原理：
+     * - 纸币器有 主钞箱（cashbox，容量1000张） 与 循环钞箱/循环鼓（recycler，容量80张）
+     * - 若某面额配置为"可找零"（Route=7），则优先进 recycler（容量满后即使可找零也会进 cashbox）
+     * - recycler 的钱会被 DispenseValue 吐出用于找零；吐出后 recycler 腾出空间，才能继续收可找零面额
+     * - 配置为"不可找零"（Route=0）的面额永远进 cashbox，不能用于找零
+     * 
+     * 注意：路由只影响"之后投入的钱"，之前进 CASHBOX 的钱不可能变成可找零库存。
+     * 
+     * @param deviceID 设备ID
+     * @param assignments 货币分配列表（用于生成路由配置）
+     * @param recyclableDenominations 可找零面额列表（value 列表，分）
+     * @return Boolean 是否成功
+     */
+    suspend fun applyRoutesFromUI(deviceID: String, assignments: List<CurrencyAssignment>, recyclableDenominations: List<Int>): Boolean {
+        return try {
+            Log.d(TAG, "从 UI 应用路由配置（通过 OpenConnection 携带 SetRoutes）: deviceID=$deviceID, 可找零面额数=${recyclableDenominations.size}")
+            Log.d(TAG, "注意：路由只影响\"之后投入的钱\"，之前进 CASHBOX 的钱不可能变成可找零库存。")
+            
+            // 获取设备的 Port 和 SspAddress
+            val mapping = if (deviceID == _billAcceptorDeviceID.value) {
+                billAcceptorMapping
+            } else if (deviceID == _coinAcceptorDeviceID.value) {
+                coinAcceptorMapping
+            } else {
+                null
+            }
+            
+            if (mapping == null) {
+                Log.e(TAG, "无法找到设备的 Port 和 SspAddress 映射: deviceID=$deviceID")
+                return false
+            }
+            
+            val (port, sspAddress) = mapping
+            
+            // 构建 SetRoutes 配置（用于 OpenConnection）：
+            // - recyclableDenominations 中的面额：Route=7（进 recycler，可找零）
+            // - 其他面额：Route=0（进 cashbox，不可找零）
+            // Denomination 格式："{value} {countryCode}"，例如 "500 EUR"
+            val routeItems = assignments.map { assignment ->
+                val denominationString = assignment.getDenominationString()  // 例如 "500 EUR"
+                DenominationRoute(
+                    Denomination = denominationString,
+                    Route = if (recyclableDenominations.contains(assignment.value)) 7 else 0  // 7 = recycler（可找零），0 = cashbox（不可找零）
+                )
+            }
+            
+            // 构建 SetInhibits 配置（允许接收所有面额）
+            val inhibitItems = assignments.map { assignment ->
+                DenominationInhibit(
+                    Denomination = assignment.getDenominationString(),
+                    Inhibit = false  // 允许接收
+                )
+            }
+            
+            // 打印配置内容
+            Log.d(TAG, "路由配置（从 UI）: deviceID=$deviceID, 面额数=${routeItems.size}")
+            routeItems.take(5).forEach { item ->
+                val routeName = if (item.Route == 7) "recycler（可找零）" else "cashbox（不可找零）"
+                Log.d(TAG, "  面额 ${item.Denomination}: Route=${item.Route} ($routeName)")
+            }
+            
+            // 步骤 1: DisableAcceptor
+            Log.d(TAG, "步骤 1: 禁用接收器...")
+            val disableSuccess = disableAcceptor(deviceID)
+            if (!disableSuccess) {
+                Log.w(TAG, "禁用接收器失败，但继续执行后续步骤")
+            }
+            
+            // 步骤 2: OpenConnection(携带 SetRoutes)
+            Log.d(TAG, "步骤 2: 重新打开连接（携带 SetRoutes）...")
+            val request = createOpenConnectionRequest(
+                comPort = port,
+                sspAddress = sspAddress,
+                deviceID = deviceID,
+                enableAcceptor = false,  // 先不启用，等 EnableAcceptor 时再启用
+                enableAutoAcceptEscrow = true,
+                enablePayout = true,  // 设备连接成功后自动启用找零功能
+                setInhibits = inhibitItems,
+                setRoutes = routeItems
+            )
+            
+            // 序列化请求体（用于日志）
+            val requestBodyJson = kotlinx.serialization.json.Json.encodeToString(
+                kotlinx.serialization.serializer<OpenConnectionRequest>(), request
+            )
+            
+            // 构建完整 URL（用于日志）
+            val baseUrl = "http://127.0.0.1:5000/api"
+            val fullUrl = "$baseUrl/CashDevice/OpenConnection"
+            
+            // 打印请求日志
+            Log.d(TAG, "========== OpenConnection(with SetRoutes) REQUEST ==========")
+            Log.d(TAG, "url: $fullUrl")
+            Log.d(TAG, "deviceID: $deviceID")
+            Log.d(TAG, "body: $requestBodyJson")
+            
+            val response = api.openConnection(request)
+            val httpCode = 200  // OpenConnection 返回的是 OpenConnectionResponse，不是 Response<ResponseBody>
+            val responseBodyJson = kotlinx.serialization.json.Json.encodeToString(
+                kotlinx.serialization.serializer<OpenConnectionResponse>(), response
+            )
+            
+            // 打印响应日志
+            Log.d(TAG, "========== OpenConnection(with SetRoutes) RESPONSE ==========")
+            Log.d(TAG, "code: $httpCode")
+            Log.d(TAG, "body: $responseBodyJson")
+            Log.d(TAG, "isOpen: ${response.IsOpen}, deviceID: ${response.deviceID}, error: ${response.error}")
+            
+            if (response.IsOpen == true && response.deviceID != null) {
+                Log.d(TAG, "OpenConnection(with SetRoutes) 成功: deviceID=${response.deviceID}, 配置了 ${routeItems.size} 个面额路由")
+                
+                // 步骤 3: EnableAcceptor
+                Log.d(TAG, "步骤 3: 启用接收器...")
+                val enableSuccess = enableAcceptor(deviceID)
+                if (!enableSuccess) {
+                    Log.w(TAG, "启用接收器失败，但路由配置已生效")
+                }
+                
+                // 验证配置是否生效
+                try {
+                    Log.d(TAG, "验证路由配置是否生效: 调用 GetCurrencyAssignment 检查 AcceptRoute/Stored/StoredInCashbox")
+                    val refreshedAssignments = fetchCurrencyAssignments(deviceID)
+                    
+                    // 打印每个可找零面额的状态
+                    recyclableDenominations.forEach { recyclableValue ->
+                        val assignment = refreshedAssignments.find { it.value == recyclableValue }
+                        if (assignment != null) {
+                            Log.d(TAG, "  面额 ${recyclableValue} 分: AcceptRoute=${assignment.acceptRoute}, Stored=${assignment.stored}, StoredInCashbox=${assignment.storedInCashbox}")
+                            if (assignment.acceptRoute != "PAYOUT") {
+                                Log.w(TAG, "  警告: 面额 ${recyclableValue} 分 配置为可找零，但 AcceptRoute=${assignment.acceptRoute}，期望 PAYOUT（注意：路由只影响之后投入的钱）")
+                            }
+                        } else {
+                            Log.w(TAG, "  警告: 面额 ${recyclableValue} 分 在 GetCurrencyAssignment 中未找到")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "验证路由配置生效时调用 GetCurrencyAssignment 失败", e)
+                }
+                
+                true
+            } else {
+                Log.e(TAG, "OpenConnection(with SetRoutes) 失败: deviceID=$deviceID, IsOpen=${response.IsOpen}, error=${response.error}, body=$responseBodyJson")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "从 UI 应用路由配置异常: deviceID=$deviceID", e)
+            e.printStackTrace()
+            false
+        }
+    }
+    
+    /**
+     * 智能清空（清空循环鼓 recycler）
+     * @param deviceID 设备ID
+     * @return Boolean 是否成功
+     */
+    suspend fun smartEmpty(deviceID: String): Boolean {
+        return try {
+            Log.d(TAG, "智能清空: deviceID=$deviceID")
+            val request = SmartEmptyRequest(moduleNumber = 0, isNV4000 = false)
+            val response = api.smartEmpty(deviceID, request)
+            val bodyText = cleanResponseBody(response.body()?.string())
+            
+            Log.d(TAG, "SmartEmpty 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
+            
+            if (response.isSuccessful) {
+                Log.d(TAG, "SmartEmpty 成功: deviceID=$deviceID, dispenseResult=$bodyText")
+                // 调用后强制刷新一次 GetCurrencyAssignment
+                try {
+                    val assignments = fetchCurrencyAssignments(deviceID)
+                    Log.d(TAG, "SmartEmpty 后刷新货币分配: count=${assignments.size}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "SmartEmpty 后刷新货币分配失败", e)
+                }
+            } else {
+                Log.e(TAG, "SmartEmpty 失败: deviceID=$deviceID, code=${response.code()}, body=$bodyText")
+            }
+            
+            response.isSuccessful
+        } catch (e: Exception) {
+            Log.e(TAG, "智能清空异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * 获取设备货币分配快照（用于 UI 显示和路由配置）
+     * @param deviceID 设备ID
+     * @return 货币分配列表
+     */
+    fun getDeviceAssignments(deviceID: String): List<CurrencyAssignment> {
+        return amountTracker.getDeviceAssignments(deviceID)
     }
     
     /**

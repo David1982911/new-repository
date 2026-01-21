@@ -213,14 +213,14 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     return
                 }
                 
-                // 轮询所有设备的库存（基于库存差值计算本次会话累计金额）
+                // 轮询所有设备的货币分配（基于 GetCurrencyAssignment 做快照差分）
                 for ((deviceName, deviceID) in devices) {
                     try {
-                        val levelsResponse = cashDeviceRepository.pollLevels(deviceID)
-                        // amountTracker 已在 pollLevels 中更新
+                        val assignmentResponse = cashDeviceRepository.pollCurrencyAssignments(deviceID)
+                        // amountTracker 已在 pollCurrencyAssignments 中更新
                         // 如果读取失败（error != null），保留上一次成功值，不中断支付流程
                     } catch (e: Exception) {
-                        Log.w(TAG, "现金支付：轮询库存异常: deviceName=$deviceName, deviceID=$deviceID", e)
+                        Log.w(TAG, "现金支付：轮询货币分配异常: deviceName=$deviceName, deviceID=$deviceID", e)
                         // 继续轮询其他设备，不中断支付流程
                     }
                 }
