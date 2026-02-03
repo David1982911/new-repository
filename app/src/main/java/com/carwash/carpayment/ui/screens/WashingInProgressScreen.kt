@@ -14,6 +14,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.carwash.carpayment.R
+import com.carwash.carpayment.data.carwash.CarWashStartState
+import com.carwash.carpayment.data.carwash.CarWashStartFailureReason
 import com.carwash.carpayment.ui.theme.KioskButtonSizes
 import com.carwash.carpayment.ui.viewmodel.PaymentViewModel
 
@@ -27,8 +29,9 @@ fun WashingInProgressScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val flowState by viewModel.flowState.collectAsState()
+    val carWashStartState by viewModel.carWashStartState.collectAsState()
     
-    Log.d("WashingInProgressScreen", "渲染洗车进行中页面，支付成功: ${state.paymentSuccess}, 状态: ${flowState.status}, 错误: ${flowState.errorMessage}")
+    Log.d("WashingInProgressScreen", "渲染洗车进行中页面，支付成功: ${state.paymentSuccess}, 状态: ${flowState.status}, 错误: ${flowState.errorMessage}, 洗车启动状态: ${carWashStartState?.javaClass?.simpleName}")
     
     Column(
         modifier = Modifier
@@ -73,9 +76,20 @@ fun WashingInProgressScreen(
         
         Spacer(modifier = Modifier.height(48.dp))
         
-        // 洗车进行中标题（KIOSK 大字号）
+        // 洗车启动状态标题（根据状态机状态动态显示）
+        val statusTitle = when (carWashStartState) {
+            is CarWashStartState.WaitingPreviousCarLeave -> "等待前车离开..."
+            is CarWashStartState.WaitingCarInPosition -> "等待车辆到位..."
+            is CarWashStartState.WaitingDeviceReady -> "等待设备就绪..."
+            is CarWashStartState.SendingMode -> "指令已发送，设备准备启动…"
+            is CarWashStartState.ConfirmingStart -> "指令已发送，设备准备启动…"
+            is CarWashStartState.Success -> "洗车程序已启动"
+            is CarWashStartState.Refunding -> "启动失败，正在退款..."
+            null -> stringResource(R.string.washing_in_progress)
+        }
+        
         Text(
-            text = stringResource(R.string.washing_in_progress),
+            text = statusTitle,
             style = MaterialTheme.typography.displaySmall,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
@@ -83,17 +97,48 @@ fun WashingInProgressScreen(
         )
         
         // 状态占位：加载指示器（KIOSK 大尺寸）
-        CircularProgressIndicator(
-            modifier = Modifier.size(100.dp),
-            strokeWidth = 8.dp,
-            color = MaterialTheme.colorScheme.primary
-        )
+        // 只有在成功状态时不显示加载指示器
+        if (carWashStartState !is CarWashStartState.Success) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(100.dp),
+                strokeWidth = 8.dp,
+                color = MaterialTheme.colorScheme.primary
+            )
+        } else {
+            // 成功状态显示对勾
+            Text(
+                text = "✓",
+                fontSize = 100.sp,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
+        }
         
         Spacer(modifier = Modifier.height(32.dp))
         
-        // 静态文案（KIOSK 大字号）
+        // 状态详情文案（根据状态机状态动态显示）
+        val statusMessage = when (val state = carWashStartState) {
+            is CarWashStartState.WaitingPreviousCarLeave -> "正在检查前车是否已离开..."
+            is CarWashStartState.WaitingCarInPosition -> "请将车辆停放在指定位置..."
+            is CarWashStartState.WaitingDeviceReady -> "正在检查设备状态..."
+            is CarWashStartState.SendingMode -> "正在发送启动指令..."
+            is CarWashStartState.ConfirmingStart -> "正在确认设备启动状态..."
+            is CarWashStartState.Success -> "洗车程序已成功启动，请稍候..."
+            is CarWashStartState.Refunding -> {
+                val reason = when (state.reason) {
+                    CarWashStartFailureReason.PREVIOUS_CAR_NOT_LEFT -> "前车未离开，请等待"
+                    CarWashStartFailureReason.CAR_NOT_IN_POSITION -> "车辆未到位，请将车辆停放在指定位置"
+                    CarWashStartFailureReason.DEVICE_NOT_READY -> "设备未就绪，请稍后再试"
+                    CarWashStartFailureReason.SEND_MODE_FAILED -> "发送命令失败，请重试"
+                    CarWashStartFailureReason.NOT_ENTERED_AUTO_STATUS -> "未进入自动状态，请重试"
+                }
+                "启动失败: $reason"
+            }
+            null -> stringResource(R.string.washing_message)
+        }
+        
         Text(
-            text = stringResource(R.string.washing_message),
+            text = statusMessage,
             style = MaterialTheme.typography.titleLarge,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

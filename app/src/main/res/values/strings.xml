@@ -26,6 +26,64 @@
     <string name="language_de">DE</string>
     <string name="language_en">EN</string>
     
+    <!-- 洗车机状态 -->
+    <string name="status_ready">Ready</string>
+    <string name="status_fault">Fault</string>
+    <string name="status_occupied">Occupied</string>
+    <string name="status_not_ready">Not Ready</string>
+    <string name="status_unknown">Unknown</string>
+    <string name="status_updating">Updating...</string>
+    <string name="status_offline">Offline</string>
+    
+    <!-- 现金支付 -->
+    <string name="cash_target">Target: %1$s</string>
+    <string name="cash_paid">Paid: %1$s</string>
+    <string name="cash_remaining">Remaining: %1$s</string>
+    <string name="cash_accepted_denominations">Accepted denominations: %1$s</string>
+    
+    <!-- 错误 -->
+    <string name="error_device_not_connected">Device not connected</string>
+    <string name="error_communication_failed">Communication failed</string>
+    <string name="error_carwash_comm_failed_title">Car wash communication failed</string>
+    <string name="error_carwash_comm_failed_body">Please check RS485 wiring and station address.</string>
+    <string name="error_check_485_wiring">Please check RS485 wiring and station address.</string>
+    <string name="error_payment_timeout_body">Payment timed out (not enough amount within %1$d seconds). Please retry.</string>
+    <string name="error_device_fault">Device fault detected. Please contact support.</string>
+    <string name="payment_failed">Payment failed</string>
+    <string name="button_cancel">Cancel</string>
+    
+    <!-- Change Error -->
+    <string name="error_change_insufficient">Unable to give change. Please call staff.</string>
+    <string name="error_change_failed">Change failed. Manual intervention required.</string>
+    <string name="error_change_levels_unavailable">Change inventory unavailable. Please call staff.</string>
+    <string name="error_counters_parse_failed">Unable to read payment amount. Please check device connection or contact support.</string>
+    
+    <!-- Cash Payment UI -->
+    <string name="cash_paid_amount">Paid: %1$s</string>
+    <string name="cash_remaining_amount">Remaining: %1$s</string>
+    <string name="cash_change_amount">Expected change: %1$s</string>
+    <string name="cash_target_amount">Target: %1$s</string>
+    <string name="cash_payment_processing">Processing cash payment, please insert cash...</string>
+    <string name="cash_note_rejected_title">Banknote Not Accepted</string>
+    <string name="cash_note_rejected">This banknote is not accepted. Please insert smaller notes/coins or pay by card.</string>
+    <string name="cash_note_rejected_with_denominations">This banknote is not accepted. Accepted notes: %1$s. Please insert smaller notes/coins or pay by card.</string>
+    <string name="cash_payment_unavailable">Cash payment currently unavailable. Please pay by card.</string>
+    
+    <!-- Printer Errors -->
+    <string name="printer_not_connected">Printer not connected</string>
+    <string name="printer_cutter_error">Printer cutter error</string>
+    <string name="printer_overheat">Printer overheating</string>
+    <string name="printer_offline">Printer offline</string>
+    <string name="printer_no_paper">Printer out of paper</string>
+    <string name="printer_cover_open">Printer cover open</string>
+    <string name="printer_status_query_failed">Printer status query failed</string>
+    <string name="printer_write_failed">Print failed</string>
+    <string name="printer_exception">Print exception occurred</string>
+    
+    <string name="payment_card_processing">POS payment processing, please swipe card...</string>
+    <string name="payment_processing">Payment processing...</string>
+    <string name="payment_success_redirecting">Payment successful! Redirecting...</string>
+    
     <!-- 页面2: 选择支付 -->
     <string name="select_payment_title">Zahlungsmethode wählen</string>
     <string name="selected_program">Ausgewähltes Programm: %1$s</string>
@@ -61,4 +119,71 @@
     <string name="export_excel_success">Excel erfolgreich exportiert</string>
     <string name="export_excel_failed">Excel-Export fehlgeschlagen</string>
     <string name="export_no_data">Keine Daten zum Exportieren</string>
+    
+    <!-- 现金支付 -->
+    <string name="cancel_payment">Zahlung abbrechen</string>
+    <string name="cash_insert_hint">Bitte kleine Scheine/Münzen einwerfen: %1$s</string>
+    <string name="cash_cannot_accept_large">Scheine/Münzen %1$s können nicht akzeptiert werden, da Wechselgeld nicht ausreicht</string>
+    <string name="cash_total_inserted">Gesamt eingeworfen: %1$s</string>
+    <string name="cash_bills_inserted">Scheine: %1$s</string>
+    <string name="cash_coins_inserted">Münzen: %1$s</string>
+    <string name="cash_refunding">Rückerstattung wird bearbeitet...</string>
+    <string name="cash_refund_success">Rückerstattung erfolgreich</string>
+    <string name="cash_refund_failed">Rückerstattung fehlgeschlagen: %1$s</string>
+    
+    <!-- 打印机 -->
+    <string name="printer_print_failed">Druck fehlgeschlagen: %1$s</string>
+    
+    <!-- 支付失败 -->
+    <string name="payment_failed_retry">Erneut versuchen</string>
+    <string name="payment_failed_change_method">Zahlungsmethode ändern</string>
+    
+    <!-- Gerätetest-Bildschirm (Default: German) -->
+    <string name="device_test_title">Gerätetest</string>
+    <string name="device_test_bill_acceptor">Geldscheinakzeptor</string>
+    <string name="device_test_coin_acceptor">Münzakzeptor</string>
+    <string name="device_test_printer">Drucker</string>
+    <string name="device_test_connected">Verbunden</string>
+    <string name="device_test_disconnected">Nicht verbunden</string>
+    <string name="device_test_enabled">Annahme aktiviert</string>
+    <string name="device_test_disabled">Annahme deaktiviert</string>
+    <string name="device_test_event_count">Ereigniszähler: %1$d</string>
+    <string name="device_test_last_event">Letztes Ereignis: %1$s</string>
+    <string name="device_test_status">Status: %1$s</string>
+    <string name="device_test_device_id">Geräte-ID: %1$s</string>
+    <string name="device_test_session_amount">Sitzungsbetrag: %1$s € (%2$d Cent)</string>
+    <string name="device_test_total_amount">Gesamtbestand: %1$s € (%2$d Cent)</string>
+    <string name="device_test_baseline_info">Baseline: %1$s € | Current: %2$s € | Delta: %3$s €</string>
+    <string name="device_test_reset_baseline">Reset Session Baseline</string>
+    <string name="device_test_reset_baseline_hint">Reset baseline to current value (delta will be zero)</string>
+    <string name="device_test_session_reset">Session reset. Insert coins/notes again.</string>
+    <string name="error_counters_read_failed">Unable to read device status. Please retry.</string>
+    <string name="device_test_recent_changes">Letzte Änderungen:</string>
+    <string name="device_test_denomination_list">Nennwertliste</string>
+    <string name="device_test_host_enable">Host Enable</string>
+    <string name="device_test_route_to_payout">Route To Payout</string>
+    <string name="device_test_dispense">Wechselgeld</string>
+    <string name="device_test_dispense_amount">Wechselgeldbetrag (EUR, z.B. 20)</string>
+    <string name="device_test_dispense_test">Wechselgeld testen</string>
+    <string name="device_test_smart_empty">SmartEmpty</string>
+    <string name="device_test_dispense_enabled">Wechselgeld aktiviert (automatisch nach Geräteverbindung)</string>
+    <string name="device_test_start_new_session">Neue Sitzung starten (Sitzungsbetrag zurücksetzen)</string>
+    <string name="device_test_logs">Testprotokolle</string>
+    <string name="device_test_no_denomination_data">Keine Nennwertdaten</string>
+    <string name="device_test_edit_route">Route bearbeiten</string>
+    <string name="device_test_exit_edit">Bearbeitung beenden</string>
+    <string name="device_test_pending_changes">Ausstehende Änderungen: %1$d Elemente</string>
+    <string name="device_test_apply_settings">Einstellungen anwenden (%1$d Änderungen)</string>
+    <string name="device_test_cancel">Abbrechen</string>
+    <string name="device_test_exit_app">App beenden</string>
+    <string name="device_test_reset_cash_baseline">Cash Baseline zurücksetzen</string>
+    <string name="device_test_no_denomination_data_detail">Gespeichert: %1$d</string>
+    <string name="device_test_denomination_detail">%1$d %2$s | %3$s | Kanal: %4$s</string>
+    
+    <!-- Passwort-Schutz -->
+    <string name="password_gate_title">Passwort eingeben</string>
+    <string name="password_gate_hint">Passwort</string>
+    <string name="password_gate_enter">Eingeben</string>
+    <string name="password_gate_error">Falsches Passwort</string>
+    <string name="password_gate_cancel">Abbrechen</string>
 </resources>

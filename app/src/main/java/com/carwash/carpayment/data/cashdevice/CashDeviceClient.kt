@@ -29,7 +29,7 @@ object CashDeviceClient {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
-        encodeDefaults = false
+        encodeDefaults = true  // ⚠️ 关键修复：改为 true，确保 CountryCode 等字段始终被序列化
         useAlternativeNames = true  // 启用 @JsonNames 支持（用于 DeviceID/deviceID 字段映射）
     }
     
@@ -81,8 +81,16 @@ object CashDeviceClient {
      * @param baseUrl 基础 URL，如果为 null 则从配置读取或使用默认值
      * @param context 用于读取配置的 Context（可选）
      * @param timeoutSeconds 超时时间（秒），默认 30 秒（OpenConnection 需要等待设备响应）
+     * @param readTimeoutSeconds 读取超时时间（秒），如果为 null 则使用 timeoutSeconds
+     * @param writeTimeoutSeconds 写入超时时间（秒），如果为 null 则使用 timeoutSeconds
      */
-    fun createWithTimeout(baseUrl: String? = null, context: Context? = null, timeoutSeconds: Long = 30): CashDeviceApi {
+    fun createWithTimeout(
+        baseUrl: String? = null, 
+        context: Context? = null, 
+        timeoutSeconds: Long = 30,
+        readTimeoutSeconds: Long? = null,
+        writeTimeoutSeconds: Long? = null
+    ): CashDeviceApi {
         val rawBaseUrl = baseUrl ?: getBaseUrl(context)
         val normalizedBaseUrl = if (rawBaseUrl.endsWith("/")) rawBaseUrl else "$rawBaseUrl/"
         
@@ -104,8 +112,8 @@ object CashDeviceClient {
             .addInterceptor(loggingInterceptor)
             .cookieJar(cookieJar)  // 添加 Cookie 持久化
             .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
-            .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
-            .writeTimeout(timeoutSeconds, TimeUnit.SECONDS)
+            .readTimeout(readTimeoutSeconds ?: timeoutSeconds, TimeUnit.SECONDS)  // ⚠️ 关键修复：独立读取超时配置
+            .writeTimeout(writeTimeoutSeconds ?: timeoutSeconds, TimeUnit.SECONDS)  // ⚠️ 关键修复：独立写入超时配置
             .build()
         
         return Retrofit.Builder()

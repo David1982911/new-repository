@@ -43,6 +43,12 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         val sessionAmount: Double = 0.0,  // 本次会话累计金额（元）
         val totalAmountCents: Int = 0,    // 设备总库存金额（分）- currentTotalCents
         val totalAmount: Double = 0.0,    // 设备总库存金额（元）
+        val baselineCents: Int = 0,       // 会话基线金额（分）- baselineTotalReceivedCents
+        val baselineAmount: Double = 0.0, // 会话基线金额（元）
+        val currentCents: Int = 0,        // 当前总收款金额（分）- currentTotalReceivedCents
+        val currentAmount: Double = 0.0,  // 当前总收款金额（元）
+        val deltaCents: Int = 0,           // 会话增量金额（分）- delta = current - baseline
+        val deltaAmount: Double = 0.0,    // 会话增量金额（元）
         val levels: List<com.carwash.carpayment.data.cashdevice.LevelEntry> = emptyList(),  // 库存明细（兼容旧接口）
         val assignments: List<com.carwash.carpayment.data.cashdevice.CurrencyAssignment> = emptyList(),  // 货币分配列表（基于 GetCurrencyAssignment）
         val recentChanges: List<com.carwash.carpayment.data.cashdevice.CashAmountTracker.AmountChange> = emptyList(),  // 最近变化明细（用于显示 "+5€ x1" 等）
@@ -244,11 +250,22 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     
     /**
      * 连接纸币器
+     * ⚠️ 已废弃：设备在 APP 启动时自动连接，UI 不再允许用户触发连接/断开
+     * 保留此方法仅用于内部测试，UI 不应调用
      */
-    fun connectBillAcceptor() {
+    internal fun connectBillAcceptor() {
         viewModelScope.launch {
             try {
                 addLog("开始连接纸币器 (SSP=0)...")
+                // ⚠️ 检查是否正在支付中（防止重复连接）
+                val isPaymentInProgress = false  // TODO: 从 PaymentViewModel 获取支付状态
+                if (isPaymentInProgress) {
+                    addLog("⚠️ 支付进行中，禁止重复连接纸币器")
+                    Log.w(TAG, "支付进行中，禁止重复连接纸币器")
+                    return@launch
+                }
+                
+                addLog("开始连接纸币器...")
                 val success = repository.initializeBillAcceptor(probeApi)
                 if (success) {
                     addLog("纸币器连接成功")
@@ -264,8 +281,10 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     
     /**
      * 断开纸币器
+     * ⚠️ 已废弃：设备必须保持连接（配置依赖 AES128 会话），UI 不再允许用户触发断开
+     * 保留此方法仅用于内部测试，UI 不应调用
      */
-    fun disconnectBillAcceptor() {
+    internal fun disconnectBillAcceptor() {
         viewModelScope.launch {
             val deviceID = _billAcceptorState.value.deviceID
             if (deviceID != null) {
@@ -335,11 +354,22 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     
     /**
      * 连接硬币器
+     * ⚠️ 已废弃：设备在 APP 启动时自动连接，UI 不再允许用户触发连接/断开
+     * 保留此方法仅用于内部测试，UI 不应调用
      */
-    fun connectCoinAcceptor() {
+    internal fun connectCoinAcceptor() {
         viewModelScope.launch {
             try {
                 addLog("开始连接硬币器 (SSP=16)...")
+                // ⚠️ 检查是否正在支付中（防止重复连接）
+                val isPaymentInProgress = false  // TODO: 从 PaymentViewModel 获取支付状态
+                if (isPaymentInProgress) {
+                    addLog("⚠️ 支付进行中，禁止重复连接硬币器")
+                    Log.w(TAG, "支付进行中，禁止重复连接硬币器")
+                    return@launch
+                }
+                
+                addLog("开始连接硬币器...")
                 val success = repository.initializeCoinAcceptor(probeApi)
                 if (success) {
                     addLog("硬币器连接成功")
@@ -355,8 +385,10 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     
     /**
      * 断开硬币器
+     * ⚠️ 已废弃：设备必须保持连接（配置依赖 AES128 会话），UI 不再允许用户触发断开
+     * 保留此方法仅用于内部测试，UI 不应调用
      */
-    fun disconnectCoinAcceptor() {
+    internal fun disconnectCoinAcceptor() {
         viewModelScope.launch {
             val deviceID = _coinAcceptorState.value.deviceID
             if (deviceID != null) {
@@ -476,11 +508,21 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                     val totalAmount = totalCents / 100.0
                     val recentChanges = tracker.getRecentChanges(deviceID)
                     
+                    // 获取会话基线信息（baseline/current/delta）
+                    val baselineInfo = repository.getSessionBaselineInfo(deviceID)
+                    val (baselineCents, currentCents, deltaCents) = baselineInfo ?: Triple(0, totalCents, sessionCents)
+                    
                     _billAcceptorState.value = _billAcceptorState.value.copy(
                         sessionAmountCents = sessionCents,
                         sessionAmount = sessionAmount,
                         totalAmountCents = totalCents,
                         totalAmount = totalAmount,
+                        baselineCents = baselineCents,
+                        baselineAmount = baselineCents / 100.0,
+                        currentCents = currentCents,
+                        currentAmount = currentCents / 100.0,
+                        deltaCents = deltaCents,
+                        deltaAmount = deltaCents / 100.0,
                         assignments = assignments,
                         recentChanges = recentChanges
                     )
@@ -555,11 +597,21 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                     val totalAmount = totalCents / 100.0
                     val recentChanges = tracker.getRecentChanges(deviceID)
                     
+                    // 获取会话基线信息（baseline/current/delta）
+                    val baselineInfo = repository.getSessionBaselineInfo(deviceID)
+                    val (baselineCents, currentCents, deltaCents) = baselineInfo ?: Triple(0, totalCents, sessionCents)
+                    
                     _coinAcceptorState.value = _coinAcceptorState.value.copy(
                         sessionAmountCents = sessionCents,
                         sessionAmount = sessionAmount,
                         totalAmountCents = totalCents,
                         totalAmount = totalAmount,
+                        baselineCents = baselineCents,
+                        baselineAmount = baselineCents / 100.0,
+                        currentCents = currentCents,
+                        currentAmount = currentCents / 100.0,
+                        deltaCents = deltaCents,
+                        deltaAmount = deltaCents / 100.0,
                         assignments = assignments,
                         recentChanges = recentChanges
                     )
@@ -618,11 +670,167 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                         addLog("重置硬币器基线失败: ${e.message}")
                     }
                 }
-                
-                addLog("新会话已开始")
             } catch (e: Exception) {
                 Log.e(TAG, "开始新会话异常", e)
                 addLog("开始新会话异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 重置现金支付 baseline（重新抓取 GetAllLevels 并覆盖 baseline）
+     * ⚠️ Step B: 增加"baseline 重置"能力（解决"需要清零按钮"）
+     * 只影响 APP 的会话差分，不动设备端
+     */
+    fun resetCashBaseline() {
+        viewModelScope.launch {
+            try {
+                android.util.Log.d("CASH_BASELINE_RESET", "BEGIN")
+                addLog("重置现金支付 baseline：重新抓取 GetAllLevels")
+                
+                val billDeviceID = repository.billAcceptorDeviceID.value
+                val coinDeviceID = repository.coinAcceptorDeviceID.value
+                
+                if (billDeviceID != null) {
+                    try {
+                        val levelsResponse = repository.readCurrentLevels(billDeviceID)
+                        repository.getBaselineStore().setBaselineLevels(billDeviceID, levelsResponse)
+                        val totalCents = levelsResponse.calculateTotalCents()
+                        android.util.Log.d("CASH_BASELINE_RESET", "billDeviceID=$billDeviceID totalCents=$totalCents")
+                        addLog("纸币器 baseline 已重置: ${totalCents / 100.0}€")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "重置纸币器 baseline 失败", e)
+                        addLog("重置纸币器 baseline 失败: ${e.message}")
+                    }
+                } else {
+                    addLog("纸币器未连接，跳过 baseline 重置")
+                }
+                
+                if (coinDeviceID != null) {
+                    try {
+                        val levelsResponse = repository.readCurrentLevels(coinDeviceID)
+                        repository.getBaselineStore().setBaselineLevels(coinDeviceID, levelsResponse)
+                        val totalCents = levelsResponse.calculateTotalCents()
+                        android.util.Log.d("CASH_BASELINE_RESET", "coinDeviceID=$coinDeviceID totalCents=$totalCents")
+                        addLog("硬币器 baseline 已重置: ${totalCents / 100.0}€")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "重置硬币器 baseline 失败", e)
+                        addLog("重置硬币器 baseline 失败: ${e.message}")
+                    }
+                } else {
+                    addLog("硬币器未连接，跳过 baseline 重置")
+                }
+                
+                android.util.Log.d("CASH_BASELINE_RESET", "END")
+                addLog("现金支付 baseline 重置完成")
+            } catch (e: Exception) {
+                Log.e(TAG, "重置现金支付 baseline 异常", e)
+                addLog("重置现金支付 baseline 异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 重置会话基线（将基线设为当前值，相当于让delta归零）
+     * @param deviceID 设备ID
+     */
+    fun resetSessionBaseline(deviceID: String) {
+        viewModelScope.launch {
+            try {
+                val success = repository.resetSessionBaseline(deviceID)
+                if (success) {
+                    addLog("会话基线已重置: deviceID=$deviceID")
+                    // 刷新状态
+                    refreshDeviceStates()
+                } else {
+                    addLog("重置会话基线失败: deviceID=$deviceID")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "重置会话基线异常: deviceID=$deviceID", e)
+                addLog("重置会话基线异常: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * 获取会话基线信息（用于UI显示）
+     * @param deviceID 设备ID
+     * @return Triple(baselineCents, currentCents, deltaCents)
+     */
+    suspend fun getSessionBaselineInfo(deviceID: String): Triple<Int, Int, Int>? {
+        return repository.getSessionBaselineInfo(deviceID)
+    }
+    
+    /**
+     * 刷新设备状态（用于重置基线后刷新）
+     */
+    private fun refreshDeviceStates() {
+        viewModelScope.launch {
+            val billDeviceID = repository.billAcceptorDeviceID.value
+            val coinDeviceID = repository.coinAcceptorDeviceID.value
+            
+            if (billDeviceID != null) {
+                try {
+                    val assignments = repository.pollCurrencyAssignments(billDeviceID)
+                    val tracker = repository.getAmountTracker()
+                    val sessionCents = tracker.getDeviceSessionCents(billDeviceID)
+                    val sessionAmount = sessionCents / 100.0
+                    val totalCents = tracker.getDeviceCurrentCents(billDeviceID)
+                    val totalAmount = totalCents / 100.0
+                    val recentChanges = tracker.getRecentChanges(billDeviceID)
+                    
+                    val baselineInfo = repository.getSessionBaselineInfo(billDeviceID)
+                    val (baselineCents, currentCents, deltaCents) = baselineInfo ?: Triple(0, totalCents, sessionCents)
+                    
+                    _billAcceptorState.value = _billAcceptorState.value.copy(
+                        sessionAmountCents = sessionCents,
+                        sessionAmount = sessionAmount,
+                        totalAmountCents = totalCents,
+                        totalAmount = totalAmount,
+                        baselineCents = baselineCents,
+                        baselineAmount = baselineCents / 100.0,
+                        currentCents = currentCents,
+                        currentAmount = currentCents / 100.0,
+                        deltaCents = deltaCents,
+                        deltaAmount = deltaCents / 100.0,
+                        assignments = assignments,
+                        recentChanges = recentChanges
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "刷新纸币器状态失败", e)
+                }
+            }
+            
+            if (coinDeviceID != null) {
+                try {
+                    val assignments = repository.pollCurrencyAssignments(coinDeviceID)
+                    val tracker = repository.getAmountTracker()
+                    val sessionCents = tracker.getDeviceSessionCents(coinDeviceID)
+                    val sessionAmount = sessionCents / 100.0
+                    val totalCents = tracker.getDeviceCurrentCents(coinDeviceID)
+                    val totalAmount = totalCents / 100.0
+                    val recentChanges = tracker.getRecentChanges(coinDeviceID)
+                    
+                    val baselineInfo = repository.getSessionBaselineInfo(coinDeviceID)
+                    val (baselineCents, currentCents, deltaCents) = baselineInfo ?: Triple(0, totalCents, sessionCents)
+                    
+                    _coinAcceptorState.value = _coinAcceptorState.value.copy(
+                        sessionAmountCents = sessionCents,
+                        sessionAmount = sessionAmount,
+                        totalAmountCents = totalCents,
+                        totalAmount = totalAmount,
+                        baselineCents = baselineCents,
+                        baselineAmount = baselineCents / 100.0,
+                        currentCents = currentCents,
+                        currentAmount = currentCents / 100.0,
+                        deltaCents = deltaCents,
+                        deltaAmount = deltaCents / 100.0,
+                        assignments = assignments,
+                        recentChanges = recentChanges
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "刷新硬币器状态失败", e)
+                }
             }
         }
     }
@@ -959,6 +1167,8 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                         // 调用 SetDenominationRoute（在线配置，不导致连接断开）
                         val success = repository.setDenominationRoute(deviceID, value, currency, route, probeMode = true)
                         
+                        Log.d("DEVICE_TEST", "SET_ROUTE value=$value route=$route device=$deviceID result=$success")
+                        
                         if (success) {
                             Log.d(TAG, "toggleDenominationRecyclable: SetDenominationRoute 成功，刷新货币分配")
                             addLog("面额路由切换成功")
@@ -1022,6 +1232,8 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
             // inhibit = !isEnabled（isEnabled=true 表示允许接收，所以 inhibit=false）
             val inhibit = !isEnabled
             val success = repository.setDenominationInhibit(deviceID, value, currency, inhibit)
+            
+            Log.d("DEVICE_TEST", "SET_INHIBIT value=$value enabled=$isEnabled device=$deviceID result=$success")
             
             if (success) {
                 Log.d(TAG, "toggleDenominationEnabled: SetDenominationInhibit 成功，刷新货币分配")
@@ -1165,6 +1377,8 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
             val inhibit = !isEnabled
             val success = repository.setDenominationInhibit(deviceID, value, currency, inhibit)
             
+            Log.d("DEVICE_TEST", "SET_INHIBIT value=$value enabled=$isEnabled device=$deviceID result=$success")
+            
             if (success) {
                 Log.d(TAG, "toggleDenominationEnabledCoin: SetDenominationInhibit 成功，刷新货币分配")
                 addLog("面额接收状态切换成功")
@@ -1217,6 +1431,8 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                 // 调用 SetDenominationRoute（在线配置，不导致连接断开）
                 val success = repository.setDenominationRoute(deviceID, value, currency, route, probeMode = true)
                 
+                Log.d("DEVICE_TEST", "SET_ROUTE value=$value route=$route device=$deviceID result=$success")
+                
                 if (success) {
                     Log.d(TAG, "toggleDenominationRecyclableCoin: SetDenominationRoute 成功，刷新货币分配")
                     addLog("面额路由切换成功")
@@ -1252,28 +1468,27 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
      */
     fun smartEmptyBill() {
         viewModelScope.launch {
-            val deviceID = repository.billAcceptorDeviceID.value
-            if (deviceID == null) {
-                addLog("纸币器未连接，无法执行智能清空")
-                return@launch
-            }
-            
             withDeviceCommandLock(true) {
                 try {
                     Log.d(TAG, "========== SmartEmpty 纸币器 ==========")
                     addLog("执行智能清空（清空循环鼓）...")
-                    val success = repository.smartEmpty(deviceID)
+                    val success = repository.smartEmptyBill()
+                    val deviceID = repository.billAcceptorDeviceID.value
+                    Log.d("DEVICE_TEST", "SMART_EMPTY device=$deviceID result=$success")
                     if (success) {
                         Log.d(TAG, "SmartEmpty 纸币器成功")
                         addLog("✅ 智能清空成功")
                         // 刷新货币分配
                         delay(500)
-                        val refreshedAssignments = repository.fetchCurrencyAssignments(deviceID)
-                        val tracker = repository.getAmountTracker()
-                        tracker.updateFromAssignments(deviceID, refreshedAssignments)
-                        _billAcceptorState.value = _billAcceptorState.value.copy(
-                            assignments = refreshedAssignments
-                        )
+                        val refreshedDeviceID = repository.billAcceptorDeviceID.value
+                        if (refreshedDeviceID != null) {
+                            val refreshedAssignments = repository.fetchCurrencyAssignments(refreshedDeviceID)
+                            val tracker = repository.getAmountTracker()
+                            tracker.updateFromAssignments(refreshedDeviceID, refreshedAssignments)
+                            _billAcceptorState.value = _billAcceptorState.value.copy(
+                                assignments = refreshedAssignments
+                            )
+                        }
                     } else {
                         Log.e(TAG, "SmartEmpty 纸币器失败")
                         addLog("❌ 智能清空失败")
@@ -1291,28 +1506,27 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
      */
     fun smartEmptyCoin() {
         viewModelScope.launch {
-            val deviceID = repository.coinAcceptorDeviceID.value
-            if (deviceID == null) {
-                addLog("硬币器未连接，无法执行智能清空")
-                return@launch
-            }
-            
             withDeviceCommandLock(false) {
                 try {
                     Log.d(TAG, "========== SmartEmpty 硬币器 ==========")
                     addLog("执行智能清空（清空库存）...")
-                    val success = repository.smartEmpty(deviceID)
+                    val success = repository.smartEmptyCoin()
+                    val deviceID = repository.coinAcceptorDeviceID.value
+                    Log.d("DEVICE_TEST", "SMART_EMPTY device=$deviceID result=$success")
                     if (success) {
                         Log.d(TAG, "SmartEmpty 硬币器成功")
                         addLog("✅ 智能清空成功")
                         // 刷新货币分配
                         delay(500)
-                        val refreshedAssignments = repository.fetchCurrencyAssignments(deviceID)
-                        val tracker = repository.getAmountTracker()
-                        tracker.updateFromAssignments(deviceID, refreshedAssignments)
-                        _coinAcceptorState.value = _coinAcceptorState.value.copy(
-                            assignments = refreshedAssignments
-                        )
+                        val refreshedDeviceID = repository.coinAcceptorDeviceID.value
+                        if (refreshedDeviceID != null) {
+                            val refreshedAssignments = repository.fetchCurrencyAssignments(refreshedDeviceID)
+                            val tracker = repository.getAmountTracker()
+                            tracker.updateFromAssignments(refreshedDeviceID, refreshedAssignments)
+                            _coinAcceptorState.value = _coinAcceptorState.value.copy(
+                                assignments = refreshedAssignments
+                            )
+                        }
                     } else {
                         Log.e(TAG, "SmartEmpty 硬币器失败")
                         addLog("❌ 智能清空失败")

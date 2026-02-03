@@ -36,15 +36,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.carwash.carpayment.AppBuildMark
+import com.carwash.carpayment.R
+import android.os.Process
 import com.carwash.carpayment.data.cashdevice.CurrencyAssignment
 import com.carwash.carpayment.data.cashdevice.CashAmountTracker
-import com.carwash.carpayment.ui.theme.KioskButtonSizes
 import com.carwash.carpayment.ui.viewmodel.CashDeviceTestViewModel
+import com.carwash.carpayment.ui.viewmodel.PrinterTabViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 /**
  * 现金设备测试屏幕
@@ -53,13 +57,15 @@ import com.carwash.carpayment.ui.viewmodel.CashDeviceTestViewModel
 @Composable
 fun DeviceTestScreen(
     viewModel: CashDeviceTestViewModel,
-    onBack: () -> Unit
+    printerTabViewModel: PrinterTabViewModel = viewModel(),
+    onBack: () -> Unit,
+    onExitApp: () -> Unit
 ) {
     val billState by viewModel.billAcceptorState.collectAsState()
     val coinState by viewModel.coinAcceptorState.collectAsState()
     val logs by viewModel.testLogs.collectAsState()
     
-    // 选项卡状态：0=纸币器, 1=硬币器
+    // 选项卡状态：0=纸币器, 1=硬币器, 2=打印机
     var selectedTabIndex by remember { mutableStateOf(0) }
 
     Log.d(
@@ -87,15 +93,50 @@ fun DeviceTestScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "现金设备连通性测试",
+                text = stringResource(R.string.device_test_title),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
-            Text(
-                text = AppBuildMark.BUILD_MARK,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = AppBuildMark.BUILD_MARK,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                // ⚠️ Step B: 重置现金支付 baseline 按钮
+                Button(
+                    onClick = {
+                        Log.d("DeviceTestScreen", "重置现金支付 baseline 按钮被点击")
+                        viewModel.resetCashBaseline()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.tertiary
+                    )
+                ) {
+                    Text(
+                        text = stringResource(R.string.device_test_reset_cash_baseline),
+                        fontSize = 12.sp
+                    )
+                }
+                // 退出APP按钮
+                Button(
+                    onClick = {
+                        Log.d("DeviceTestScreen", "退出APP按钮被点击")
+                        onExitApp()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text(
+                        text = stringResource(R.string.device_test_exit_app),
+                        fontSize = 12.sp
+                    )
+                }
+            }
         }
 
         // 选项卡
@@ -109,7 +150,7 @@ fun DeviceTestScreen(
                     selectedTabIndex = 0
                     viewModel.switchToDevice(true) // 切换到纸币器
                 },
-                text = { Text("纸币器") }
+                text = { Text(stringResource(R.string.device_test_bill_acceptor)) }
             )
             Tab(
                 selected = selectedTabIndex == 1,
@@ -117,7 +158,14 @@ fun DeviceTestScreen(
                     selectedTabIndex = 1
                     viewModel.switchToDevice(false) // 切换到硬币器
                 },
-                text = { Text("硬币器") }
+                text = { Text(stringResource(R.string.device_test_coin_acceptor)) }
+            )
+            Tab(
+                selected = selectedTabIndex == 2,
+                onClick = {
+                    selectedTabIndex = 2
+                },
+                text = { Text(stringResource(R.string.device_test_printer)) }
             )
         }
 
@@ -131,13 +179,16 @@ fun DeviceTestScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
 
-            if (selectedTabIndex == 0) {
+            if (selectedTabIndex == 2) {
+                // 打印机测试区域
+                PrinterTab(viewModel = printerTabViewModel)
+            } else if (selectedTabIndex == 0) {
         // 纸币器测试区域
                 val isEditMode by viewModel.isEditMode.collectAsState()
                 val pendingRoutes by viewModel.pendingRoutes.collectAsState()
                 
         DeviceTestCard(
-            title = "纸币器 (SSP=0)",
+            title = "${stringResource(R.string.device_test_bill_acceptor)} (SSP=0)",
             deviceID = billState.deviceID,
             isConnected = billState.isConnected,
             isEnabled = billState.isEnabled,
@@ -148,14 +199,18 @@ fun DeviceTestScreen(
                     sessionAmount = billState.sessionAmount,
                     totalAmountCents = billState.totalAmountCents,
                     totalAmount = billState.totalAmount,
+                    baselineCents = billState.baselineCents,
+                    baselineAmount = billState.baselineAmount,
+                    currentCents = billState.currentCents,
+                    currentAmount = billState.currentAmount,
+                    deltaCents = billState.deltaCents,
+                    deltaAmount = billState.deltaAmount,
                     assignments = billState.assignments,
                     recentChanges = billState.recentChanges,
                     isBillAcceptor = true,
                     isEditMode = isEditMode,
                     pendingRoutes = pendingRoutes,
                     routeChanging = billState.routeChanging,
-            onConnect = { viewModel.connectBillAcceptor() },
-            onDisconnect = { viewModel.disconnectBillAcceptor() },
             onEnable = { viewModel.enableBillAcceptor() },
                     onDisable = { viewModel.disableBillAcceptor() },
                     onDispense = { valueCents -> viewModel.dispenseBill(valueCents) },
@@ -168,12 +223,13 @@ fun DeviceTestScreen(
                     onSmartEmpty = { viewModel.smartEmptyBill() },
                     onSetEditMode = { enabled -> viewModel.setEditMode(enabled) },
                     onApplyPendingRoutes = { viewModel.applyPendingRoutes(pendingRoutes) },
-                    onCancelEdit = { viewModel.setEditMode(false) }
+                    onCancelEdit = { viewModel.setEditMode(false) },
+                    onResetBaseline = { deviceID -> viewModel.resetSessionBaseline(deviceID) }
                 )
             } else {
         // 硬币器测试区域
         DeviceTestCard(
-            title = "硬币器 (SSP=16)",
+            title = "${stringResource(R.string.device_test_coin_acceptor)} (SSP=16)",
             deviceID = coinState.deviceID,
             isConnected = coinState.isConnected,
             isEnabled = coinState.isEnabled,
@@ -184,11 +240,15 @@ fun DeviceTestScreen(
                     sessionAmount = coinState.sessionAmount,
                     totalAmountCents = coinState.totalAmountCents,
                     totalAmount = coinState.totalAmount,
+                    baselineCents = coinState.baselineCents,
+                    baselineAmount = coinState.baselineAmount,
+                    currentCents = coinState.currentCents,
+                    currentAmount = coinState.currentAmount,
+                    deltaCents = coinState.deltaCents,
+                    deltaAmount = coinState.deltaAmount,
                     assignments = coinState.assignments,
                     recentChanges = coinState.recentChanges,
                     isBillAcceptor = false,
-            onConnect = { viewModel.connectCoinAcceptor() },
-            onDisconnect = { viewModel.disconnectCoinAcceptor() },
             onEnable = { viewModel.enableCoinAcceptor() },
                     onDisable = { viewModel.disableCoinAcceptor() },
                     onDispense = { valueCents -> viewModel.dispenseCoin(valueCents) },
@@ -200,41 +260,43 @@ fun DeviceTestScreen(
                         // 硬币器也支持 Host Enable
                         viewModel.toggleDenominationEnabledCoin(value, isEnabled)
                     },
-                    onSmartEmpty = { viewModel.smartEmptyCoin() }  // 硬币器支持 Smart Empty
+                    onSmartEmpty = { viewModel.smartEmptyCoin() },  // 硬币器支持 Smart Empty
+                    onResetBaseline = { deviceID -> viewModel.resetSessionBaseline(deviceID) }
                 )
             }
 
-            // 开始新会话按钮
-            Button(
-                onClick = { viewModel.startNewSession() },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.tertiary
-                )
-            ) {
-                Text(
-                    text = "开始新会话（清零本次投入金额）",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+            // 开始新会话按钮（仅现金设备 Tab 显示）
+            if (selectedTabIndex != 2) {
+                Button(
+                    onClick = { viewModel.startNewSession() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.tertiary
+                    )
+                ) {
+                    Text(
+                        text = stringResource(R.string.device_test_start_new_session),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
 
-            // 测试日志区域（修复：Card 正确闭合，不再把返回按钮塞进 Card 里）
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(300.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
+                // 测试日志区域（仅现金设备 Tab 显示）
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
                 Text(
-                    text = "测试日志",
+                    text = stringResource(R.string.device_test_logs),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(bottom = 8.dp)
@@ -254,20 +316,21 @@ fun DeviceTestScreen(
                     }
                 }
             }
-        }
+                }
+            }
         
-            // 返回按钮（放在日志 Card 外面）
+            // 返回按钮
         Button(
             onClick = onBack,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(KioskButtonSizes.MediumButtonHeight),
+                .height(64.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.secondary
             )
         ) {
             Text(
-                text = "返回",
+                text = stringResource(R.string.button_back),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -294,11 +357,15 @@ private fun DeviceTestCard(
     sessionAmount: Double,
     totalAmountCents: Int,
     totalAmount: Double,
+    baselineCents: Int = 0,        // 会话基线金额（分）
+    baselineAmount: Double = 0.0,  // 会话基线金额（元）
+    currentCents: Int = 0,         // 当前总收款金额（分）
+    currentAmount: Double = 0.0,   // 当前总收款金额（元）
+    deltaCents: Int = 0,           // 会话增量金额（分）
+    deltaAmount: Double = 0.0,     // 会话增量金额（元）
     assignments: List<CurrencyAssignment>,
     recentChanges: List<CashAmountTracker.AmountChange>,
     isBillAcceptor: Boolean, // true=纸币器（支持路由切换），false=硬币器（不支持）
-    onConnect: () -> Unit,
-    onDisconnect: () -> Unit,
     onEnable: () -> Unit,
     onDisable: () -> Unit,
     onDispense: (Int) -> Unit,
@@ -310,7 +377,8 @@ private fun DeviceTestCard(
     routeChanging: Map<Int, Boolean> = emptyMap(),  // 正在切换路由的面额（仅纸币器）
     onSetEditMode: ((Boolean) -> Unit)? = null,  // 设置编辑模式（仅纸币器）
     onApplyPendingRoutes: (() -> Unit)? = null,  // 应用待应用的路由变更（仅纸币器）
-    onCancelEdit: (() -> Unit)? = null  // 取消编辑（仅纸币器）
+    onCancelEdit: (() -> Unit)? = null,  // 取消编辑（仅纸币器）
+    onResetBaseline: ((String) -> Unit)? = null  // 重置会话基线（deviceID）
 ) {
     var dispenseAmountText by remember { mutableStateOf("") }
 
@@ -347,7 +415,7 @@ private fun DeviceTestCard(
                     shape = MaterialTheme.shapes.small
                 ) {
                     Text(
-                        text = if (isConnected) "已连接" else "未连接",
+                        text = if (isConnected) stringResource(R.string.device_test_connected) else stringResource(R.string.device_test_disconnected),
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                         color = MaterialTheme.colorScheme.onPrimary,
                         fontSize = 14.sp
@@ -357,7 +425,7 @@ private fun DeviceTestCard(
             
             if (deviceID != null) {
                 Text(
-                    text = "DeviceID: $deviceID",
+                    text = stringResource(R.string.device_test_device_id, deviceID),
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
@@ -369,7 +437,7 @@ private fun DeviceTestCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "事件计数: $eventCount",
+                    text = stringResource(R.string.device_test_event_count, eventCount),
                     style = MaterialTheme.typography.bodyMedium
                 )
 
@@ -378,7 +446,7 @@ private fun DeviceTestCard(
                         shape = MaterialTheme.shapes.small
                     ) {
                         Text(
-                        text = if (isEnabled) "允许收款" else "禁止收款",
+                        text = if (isEnabled) stringResource(R.string.device_test_enabled) else stringResource(R.string.device_test_disabled),
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                         color = if (isEnabled) MaterialTheme.colorScheme.onSecondary else MaterialTheme.colorScheme.onError,
                             fontSize = 14.sp
@@ -388,7 +456,7 @@ private fun DeviceTestCard(
 
             if (lastStatus != null) {
                 Text(
-                    text = "状态: $lastStatus",
+                    text = stringResource(R.string.device_test_status, lastStatus),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -396,7 +464,7 @@ private fun DeviceTestCard(
 
             if (lastEvent != null) {
                 Text(
-                    text = "最后事件: $lastEvent",
+                    text = stringResource(R.string.device_test_last_event, lastEvent),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -415,25 +483,36 @@ private fun DeviceTestCard(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // ⚠️ 会话基线信息（baseline/current/delta）- 用于现场验证
+                    // 注意：baseline 来自硬件累计计数，App 只在会话内用 delta 计算
+                    if (deviceID != null) {
+                        Text(
+                            text = stringResource(R.string.device_test_baseline_info, 
+                                String.format("%.2f", baselineAmount),
+                                String.format("%.2f", currentAmount),
+                                String.format("%.2f", deltaAmount)
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    }
+                    
                     Text(
-                        text = "实时金额",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "本次会话已收金额: ${String.format("%.2f", sessionAmount)} € (${sessionAmountCents} 分)",
+                        text = stringResource(R.string.device_test_session_amount, String.format("%.2f", sessionAmount), sessionAmountCents),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "设备库存金额（总）: ${String.format("%.2f", totalAmount)} € (${totalAmountCents} 分)",
+                        text = stringResource(R.string.device_test_total_amount, String.format("%.2f", totalAmount), totalAmountCents),
                         style = MaterialTheme.typography.bodyMedium
                     )
 
                     if (recentChanges.isNotEmpty()) {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                         Text(
-                            text = "最近变化:",
+                            text = stringResource(R.string.device_test_recent_changes),
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -469,7 +548,7 @@ private fun DeviceTestCard(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "面额列表",
+                            text = stringResource(R.string.device_test_denomination_list),
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -484,7 +563,7 @@ private fun DeviceTestCard(
                                 )
                             ) {
                                 Text(
-                                    text = if (isEditMode) "退出编辑" else "编辑路由",
+                                    text = if (isEditMode) stringResource(R.string.device_test_exit_edit) else stringResource(R.string.device_test_edit_route),
                                     fontSize = 12.sp
                                 )
                             }
@@ -502,7 +581,7 @@ private fun DeviceTestCard(
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
-                                    text = "待应用变更: ${pendingRoutes.size} 项",
+                                    text = stringResource(R.string.device_test_pending_changes, pendingRoutes.size),
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -518,7 +597,7 @@ private fun DeviceTestCard(
                                                 containerColor = MaterialTheme.colorScheme.primary
                                             )
                                         ) {
-                                            Text("应用设置 (${pendingRoutes.size}项变更)", fontSize = 12.sp)
+                                            Text(stringResource(R.string.device_test_apply_settings, pendingRoutes.size), fontSize = 12.sp)
                                         }
                                     }
                                     if (onCancelEdit != null) {
@@ -529,7 +608,7 @@ private fun DeviceTestCard(
                                                 containerColor = MaterialTheme.colorScheme.surfaceVariant
                                             )
                                         ) {
-                                            Text("取消", fontSize = 12.sp)
+                                            Text(stringResource(R.string.device_test_cancel), fontSize = 12.sp)
                                         }
                                     }
                                 }
@@ -539,7 +618,7 @@ private fun DeviceTestCard(
                     
                     if (assignments.isEmpty()) {
                         Text(
-                            text = "无面额数据",
+                            text = stringResource(R.string.device_test_no_denomination_data),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -590,7 +669,7 @@ private fun DeviceTestCard(
                                 contentAlignment = Alignment.CenterStart
                             ) {
                                 Text(
-                                    text = "Host Enable",
+                                    text = stringResource(R.string.device_test_host_enable),
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -655,7 +734,7 @@ private fun DeviceTestCard(
                                 contentAlignment = Alignment.CenterStart
                             ) {
                                 Text(
-                                    text = "Route To Payout",
+                                    text = stringResource(R.string.device_test_route_to_payout),
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -732,12 +811,6 @@ private fun DeviceTestCard(
                         
                         // 详细信息（可选，折叠显示）
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                        Text(
-                            text = "详细信息",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 10.sp
-                        )
                         assignments.forEach { assignment ->
                             val countryCodeText = assignment.countryCode ?: "EUR"
                             val storedText = if (isBillAcceptor && assignment.storedInCashbox > 0) {
@@ -769,7 +842,7 @@ private fun DeviceTestCard(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "找零功能",
+                            text = stringResource(R.string.device_test_dispense),
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -780,7 +853,7 @@ private fun DeviceTestCard(
                             shape = MaterialTheme.shapes.small
                         ) {
                             Text(
-                                text = "🟢 找零已启用（设备连接后自动启用）",
+                                text = "🟢 ${stringResource(R.string.device_test_dispense_enabled)}",
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                                 color = MaterialTheme.colorScheme.onPrimary,
                                 fontSize = 14.sp,
@@ -804,7 +877,21 @@ private fun DeviceTestCard(
                                         containerColor = MaterialTheme.colorScheme.secondary
                                     )
                                 ) {
-                                    Text("SmartEmpty", fontSize = 11.sp)
+                                    Text(stringResource(R.string.device_test_smart_empty), fontSize = 11.sp)
+                                }
+                            }
+                            if (onResetBaseline != null && deviceID != null) {
+                                Button(
+                                    onClick = {
+                                        Log.d("DeviceTestScreen", "MARK ==== RESET BASELINE CLICK deviceID=$deviceID ====")
+                                        onResetBaseline(deviceID)
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.tertiary
+                                    )
+                                ) {
+                                    Text(stringResource(R.string.device_test_reset_baseline), fontSize = 11.sp)
                                 }
                             }
                         }
@@ -823,7 +910,7 @@ private fun DeviceTestCard(
                                         dispenseAmountText = it
                                     }
                                 },
-                                label = { Text("找零金额（元，如 20）") },
+                                label = { Text(stringResource(R.string.device_test_dispense_amount)) },
                                 modifier = Modifier.weight(1f),
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 singleLine = true,
@@ -845,7 +932,7 @@ private fun DeviceTestCard(
                                     amountEur != null && amountEur > 0
                                 }()
                             ) {
-                                Text("测试找零")
+                                Text(stringResource(R.string.device_test_dispense_test))
                             }
                         }
 
@@ -873,30 +960,12 @@ private fun DeviceTestCard(
                 }
             }
 
-            // 底部按钮组：连接/断开 + 收款允许/禁止
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                if (!isConnected) {
-                    Button(
-                        onClick = onConnect,
-                        modifier = Modifier.weight(1f),
-                        enabled = true
-                    ) {
-                        Text("连接")
-                    }
-                } else {
-                    Button(
-                        onClick = onDisconnect,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error
-                        )
-                    ) {
-                        Text("断开")
-                    }
-                    
+            // 底部按钮组：收款允许/禁止（连接/断开按钮已删除，设备在APP启动时自动连接）
+            if (isConnected) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                     Button(
                         onClick = if (isEnabled) onDisable else onEnable,
                         modifier = Modifier.weight(1f),
@@ -907,7 +976,7 @@ private fun DeviceTestCard(
                                 MaterialTheme.colorScheme.primary
                         )
                     ) {
-                        Text(if (isEnabled) "禁止收款" else "允许收款")
+                        Text(if (isEnabled) stringResource(R.string.device_test_disabled) else stringResource(R.string.device_test_enabled))
                     }
                 }
             }

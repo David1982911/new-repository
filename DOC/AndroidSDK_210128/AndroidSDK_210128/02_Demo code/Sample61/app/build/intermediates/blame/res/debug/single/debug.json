@@ -1,0 +1,46 @@
+[
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_activity_connectcom.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\activity_connectcom.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_activity_connectip.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\activity_connectip.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\drawable_ic_launcher.png.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\drawable\\ic_launcher.png"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_dsview_combobox_main.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\dsview_combobox_main.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_start_private.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\start_private.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_activity_searchbt.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\activity_searchbt.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\drawable_icon_dropdown.png.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\drawable\\icon_dropdown.png"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_dsview_combobox_item.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\dsview_combobox_item.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_dsview_combobox_listview.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\dsview_combobox_listview.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\xml_device_filter.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\xml\\device_filter.xml"
+    },
+    {
+        "merged": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\res\\merged\\debug\\layout_activity_connectusb.xml.flat",
+        "source": "G:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\src\\main\\res\\layout\\activity_connectusb.xml"
+    }
+]

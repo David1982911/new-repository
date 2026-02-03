@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sample6</string>
+    <string name="testprinterbt2">测试蓝牙2.0打印</string>
+    <string name="testprinterbt4">测试蓝牙4.0打印</string>
+    <string name="testprinterusb">测试USB打印</string>
+    <string name="testprinternet">测试网络打印</string>
+    <string name="testprintercom">测试串口打印</string>
+    <string name="tickettype">单据类型</string>
+    <string name="tickettype58mm">58MM单据</string>
+    <string name="tickettype80mm">80MM单据</string>
+    <string name="hardwarefunction">硬件功能</string>
+    <string name="cutter">切刀</string>
+    <string name="drawer">钱箱</string>
+    <string name="beeper">蜂鸣器</string>
+    <string name="printcount">打印次数</string>
+    <string name="bitmapcompress">图形压缩</string>
+    <string name="autoprint">自动打印</string>
+    <string name="checkreturn">检查返回</string>
+    <string name="printcontent">打印内容</string>
+    <string name="small">少量</string>
+    <string name="middle">中等</string>
+    <string name="large">大量</string>
+    <string name="printsuccess">打印成功</string>
+    <string name="printfailed">打印失败</string>
+    <string name="count1">1</string>
+    <string name="count10">10</string>
+    <string name="count100">100</string>
+    <string name="count1000">1000</string>
+    <string name="port">端口</string>
+    <string name="baudrate">波特率</string>
+    
+</resources>

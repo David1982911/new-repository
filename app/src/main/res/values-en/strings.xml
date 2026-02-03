@@ -14,6 +14,8 @@
     <!-- Payment Methods -->
     <string name="payment_card">Card (Visa/MasterCard/MIR + Apple Pay/Google Pay)</string>
     <string name="payment_cash">Cash</string>
+    <string name="payment_card_processing">POS payment processing, please swipe card...</string>
+    <string name="payment_processing">Payment processing...</string>
     
     <!-- Page 1: Select Program -->
     <string name="welcome_message">Welcome</string>
@@ -61,4 +63,98 @@
     <string name="export_excel_success">Excel exported successfully</string>
     <string name="export_excel_failed">Excel export failed</string>
     <string name="export_no_data">No data to export</string>
+    
+    <!-- Cash Payment -->
+    <string name="cancel_payment">Cancel payment</string>
+    <string name="cash_insert_hint">Please insert small notes/coins: %1$s</string>
+    <string name="cash_cannot_accept_large">Cannot accept %1$s because change is insufficient</string>
+    <string name="cash_total_inserted">Total inserted: %1$s</string>
+    <string name="cash_bills_inserted">Bills: %1$s</string>
+    <string name="cash_coins_inserted">Coins: %1$s</string>
+    <string name="cash_refunding">Processing refund...</string>
+    <string name="cash_refund_success">Refund successful</string>
+    <string name="cash_refund_failed">Refund failed: %1$s</string>
+    <string name="cash_paid_amount">Paid: %1$s</string>
+    <string name="cash_remaining_amount">Remaining: %1$s</string>
+    <string name="cash_change_amount">Expected change: %1$s</string>
+    <string name="cash_target_amount">Target: %1$s</string>
+    <string name="cash_payment_processing">Processing cash payment, please insert cash...</string>
+    <string name="cash_note_rejected">This banknote is not accepted. Please insert smaller notes/coins or pay by card.</string>
+    <string name="cash_note_rejected_with_denominations">This banknote is not accepted. Accepted notes: %1$s. Please insert smaller notes/coins or pay by card.</string>
+    <string name="payment_success_redirecting">Payment successful! Redirecting...</string>
+    
+    <!-- Printer Errors -->
+    <string name="printer_not_connected">Printer not connected</string>
+    <string name="printer_cutter_error">Printer cutter error</string>
+    <string name="printer_overheat">Printer overheating</string>
+    <string name="printer_offline">Printer offline</string>
+    <string name="printer_no_paper">Printer out of paper</string>
+    <string name="printer_cover_open">Printer cover open</string>
+    <string name="printer_status_query_failed">Printer status query failed</string>
+    <string name="printer_write_failed">Print failed</string>
+    <string name="printer_exception">Print exception occurred</string>
+    
+    <!-- Printer -->
+    <string name="printer_print_failed">Print failed: %1$s</string>
+    
+    <!-- Device Test -->
+    <string name="device_test_reset_baseline">Reset Baseline</string>
+    <string name="device_test_reset_baseline_hint">Reset baseline to current value (delta will be zero)</string>
+    
+    <!-- Payment Failed -->
+    <string name="payment_failed_retry">Retry</string>
+    <string name="payment_failed_change_method">Change payment method</string>
+    
+    <!-- Car Wash Errors -->
+    <string name="error_carwash_comm_failed_title">Car wash communication failed</string>
+    <string name="error_carwash_comm_failed_body">Please check RS485 wiring and station address.</string>
+    <string name="error_check_485_wiring">Please check RS485 wiring and station address.</string>
+    
+    <!-- Change Error -->
+    <string name="error_change_insufficient">Unable to give change. Please call staff.</string>
+    <string name="error_change_failed">Change failed. Manual intervention required.</string>
+    
+    <!-- Device Test Screen -->
+    <string name="device_test_title">Device Test</string>
+    <string name="device_test_bill_acceptor">Bill Acceptor</string>
+    <string name="device_test_coin_acceptor">Coin Acceptor</string>
+    <string name="device_test_printer">Printer</string>
+    <string name="device_test_connected">Connected</string>
+    <string name="device_test_disconnected">Disconnected</string>
+    <string name="device_test_enabled">Accept Enabled</string>
+    <string name="device_test_disabled">Accept Disabled</string>
+    <string name="device_test_event_count">Event Count: %1$d</string>
+    <string name="device_test_last_event">Last Event: %1$s</string>
+    <string name="device_test_status">Status: %1$s</string>
+    <string name="device_test_device_id">DeviceID: %1$s</string>
+    <string name="device_test_session_amount">Session Amount: %1$s € (%2$d cents)</string>
+    <string name="device_test_total_amount">Total Inventory: %1$s € (%2$d cents)</string>
+    <string name="device_test_recent_changes">Recent Changes:</string>
+    <string name="device_test_denomination_list">Denomination List</string>
+    <string name="device_test_host_enable">Host Enable</string>
+    <string name="device_test_route_to_payout">Route To Payout</string>
+    <string name="device_test_dispense">Dispense</string>
+    <string name="device_test_dispense_amount">Dispense Amount (EUR, e.g. 20)</string>
+    <string name="device_test_dispense_test">Test Dispense</string>
+    <string name="device_test_smart_empty">SmartEmpty</string>
+    <string name="device_test_dispense_enabled">Dispense Enabled (auto-enabled after device connection)</string>
+    <string name="device_test_start_new_session">Start New Session (Reset Session Amount)</string>
+    <string name="device_test_logs">Test Logs</string>
+    <string name="device_test_no_denomination_data">No denomination data</string>
+    <string name="device_test_edit_route">Edit Route</string>
+    <string name="device_test_exit_edit">Exit Edit</string>
+    <string name="device_test_pending_changes">Pending Changes: %1$d items</string>
+    <string name="device_test_apply_settings">Apply Settings (%1$d changes)</string>
+    <string name="device_test_cancel">Cancel</string>
+    <string name="device_test_exit_app">Exit App</string>
+    <string name="device_test_reset_cash_baseline">Reset Cash Baseline</string>
+    <string name="device_test_no_denomination_data_detail">Stored: %1$d</string>
+    <string name="device_test_denomination_detail">%1$d %2$s | %3$s | Channel: %4$s</string>
+    
+    <!-- Password Gate -->
+    <string name="password_gate_title">Enter Password</string>
+    <string name="password_gate_hint">Password</string>
+    <string name="password_gate_enter">Enter</string>
+    <string name="password_gate_error">Incorrect password</string>
+    <string name="password_gate_cancel">Cancel</string>
 </resources>

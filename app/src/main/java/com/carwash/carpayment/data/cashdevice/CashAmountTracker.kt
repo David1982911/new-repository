@@ -3,13 +3,16 @@ package com.carwash.carpayment.data.cashdevice
 import android.util.Log
 
 /**
- * 现金金额跟踪器（基于库存差值机制）
- * 使用本次会话累计金额（分）：
- * sessionDelta = Σ(value * (stored_now - stored_baseline))
+ * 现金金额跟踪器（基于真实收款金额）
  * 
- * 金额来源：GetAllLevels（各面额的库存数量）
- * 不使用 GetStoredValue（服务端返回 404）
- * 不使用 GetCounters（那只是计数）
+ * ⚠️ 重要变更：不再使用 GetAllLevels / Stored（库存）推算"用户投入金额"
+ * 
+ * 改为使用"本次交易的实际收款金额（credit / inserted / paid）"作为判断依据
+ * 
+ * LEVELS 只允许用于：
+ * - 找零库存显示
+ * - 运维/诊断日志
+ * 绝不能再参与 paidSessionDelta 计算
  */
 class CashAmountTracker {
     
@@ -17,34 +20,32 @@ class CashAmountTracker {
         private const val TAG = "CashAmountTracker"
     }
     
-    // 设备基线库存：deviceID:channel -> 库存数量 stored
-    // 在 OpenConnection 成功后设置（基于 GetCurrencyAssignment）
-    // 快照 key 使用：deviceId + ":" + channel（因为同 value 不同 channel 也可能存在）
+    // ⚠️ 核心变更：使用真实收款金额（credit/inserted/paid），不再使用库存差值
+    // 设备已收金额（分）：deviceID -> 本次会话累计收款金额
+    // 数据来源：GetCounters API 的 stackedTotalCents
+    private val devicePaidAmounts = mutableMapOf<String, Int>()  // key = deviceID, value = 已收金额（分）
+    
+    // 设备基线收款金额（在支付开始时记录，用于计算会话增量）
+    private val deviceBaselinePaidAmounts = mutableMapOf<String, Int>()  // key = deviceID, value = 基线金额（分）
+    
+    // 保留库存相关字段（仅用于找零库存显示和运维日志，不参与支付判断）
     private val baselineLevels = mutableMapOf<String, Int>()  // key = "deviceID:channel", value = stored
-    
-    // 设备当前库存：deviceID:channel -> 库存数量 stored
-    // 从 GetCurrencyAssignment 读取（优先使用 stored，而不是 GetAllLevels）
     private val currentLevels = mutableMapOf<String, Int>()  // key = "deviceID:channel", value = stored
-    
-    // 设备上一次库存（用于计算变化明细）：deviceID:channel -> 库存数量 stored
     private val previousLevels = mutableMapOf<String, Int>()  // key = "deviceID:channel", value = stored
-    
-    // 设备货币分配快照（用于面额识别和路由配置）：deviceID -> List<CurrencyAssignment>
     private val assignmentSnapshots = mutableMapOf<String, List<com.carwash.carpayment.data.cashdevice.CurrencyAssignment>>()
-    
-    // 设备面额映射：deviceID:channel -> value（用于金额计算）
-    private val valueMap = mutableMapOf<String, Int>()  // key = "deviceID:channel", value = 面额（分）
+    // ⚠️ 金额单位确认：valueMap 中的 value 为 cents（分），例如：100=1€，200=2€，500=5€，1000=10€
+    private val valueMap = mutableMapOf<String, Int>()  // key = "deviceID:channel", value = 面额（分，cents）
     
     /**
-     * 设置设备基线库存（在 OpenConnection 成功后调用）- 兼容旧接口
+     * 设置设备基线库存（在支付开始时调用，基于 GetAllLevels）
+     * 这是实时收款的主要方法，用于设置baseline并开始跟踪
      * @param deviceID 设备ID
      * @param levels 基线库存 - 从 GetAllLevels 读取，格式：Map<面额value, 库存数量stored>
-     * @deprecated 请使用 setBaselineFromAssignments（基于 GetCurrencyAssignment）
+     * @param dataSource 数据源标识（用于日志）："LEVELS" 或 "ASSIGNMENT"
      */
-    @Deprecated("请使用 setBaselineFromAssignments", ReplaceWith("setBaselineFromAssignments(deviceID, assignments)"))
-    fun setBaseline(deviceID: String, levels: Map<Int, Int>) {
-        // 兼容旧接口：将 value -> stored 转换为 deviceID:channel -> stored
-        // 假设 channel=0（旧接口没有 channel 信息）
+    fun setBaselineFromLevels(deviceID: String, levels: Map<Int, Int>, dataSource: String = "LEVELS") {
+        // 将 value -> stored 转换为 deviceID:channel -> stored
+        // 假设 channel=0（GetAllLevels 没有 channel 信息）
         levels.forEach { (value, stored) ->
             val key = "$deviceID:0"
             baselineLevels[key] = stored
@@ -53,7 +54,18 @@ class CashAmountTracker {
             valueMap[key] = value
         }
         val baselineTotal = calculateTotalFromLevels(levels)
-        Log.d(TAG, "设置设备基线库存（兼容旧接口）: deviceID=$deviceID, 条目数=${levels.size}, baselineTotalCents=$baselineTotal (${baselineTotal / 100.0}元)")
+        Log.d(TAG, "设置设备基线库存（基于$dataSource）: deviceID=$deviceID, 条目数=${levels.size}, baselineTotalCents=$baselineTotal (${baselineTotal / 100.0}元)")
+    }
+    
+    /**
+     * 设置设备基线库存（在 OpenConnection 成功后调用）- 兼容旧接口
+     * @param deviceID 设备ID
+     * @param levels 基线库存 - 从 GetAllLevels 读取，格式：Map<面额value, 库存数量stored>
+     * @deprecated 请使用 setBaselineFromLevels（基于 GetAllLevels）或 setBaselineFromAssignments（基于 GetCurrencyAssignment）
+     */
+    @Deprecated("请使用 setBaselineFromLevels 或 setBaselineFromAssignments", ReplaceWith("setBaselineFromLevels(deviceID, levels)"))
+    fun setBaseline(deviceID: String, levels: Map<Int, Int>) {
+        setBaselineFromLevels(deviceID, levels, "LEVELS")
     }
     
     /**
@@ -181,42 +193,71 @@ class CashAmountTracker {
     }
     
     /**
-     * 更新设备当前库存（轮询时调用）- 兼容旧接口
+     * 更新设备当前库存（轮询时调用，基于 GetAllLevels）
+     * 这是实时收款的主要方法，用于更新current并计算sessionDelta
      * @param deviceID 设备ID
-     * @param levelsResponse 库存响应（从 GetAllLevels 获取）
+     * @param levels 当前库存 - 从 GetAllLevels 获取，格式：Map<面额value, 库存数量stored>
+     * @param dataSource 数据源标识（用于日志）："LEVELS" 或 "ASSIGNMENT"
      * @return 本次会话累计金额（分）- sessionDeltaCents
-     * @deprecated 请使用 updateFromAssignments（基于 GetCurrencyAssignment）
      */
-    @Deprecated("请使用 updateFromAssignments", ReplaceWith("updateFromAssignments(deviceID, assignments)"))
-    fun update(deviceID: String, levelsResponse: LevelsResponse): Int {
-        val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
-        
-        // 兼容旧接口：将 value -> stored 转换为 deviceID:channel -> stored
-        // 假设 channel=0（旧接口没有 channel 信息）
-        levels.forEach { (value, stored) ->
+    fun updateFromLevels(deviceID: String, levels: Map<Int, Int>, dataSource: String = "LEVELS"): Int {
+        // 保存上一次库存（用于计算变化明细）
+        levels.keys.forEach { value ->
             val key = "$deviceID:0"
             previousLevels[key] = currentLevels[key] ?: 0
+        }
+        
+        // 更新当前库存和面额映射
+        levels.forEach { (value, stored) ->
+            val key = "$deviceID:0"
             currentLevels[key] = stored
             valueMap[key] = value
         }
         
-        // 计算会话差值
+        // 计算会话差值：sessionDeltaCents = max(0, Σ(value * (currentStored - baselineStored)))
         var sessionDeltaCents = 0
+        var billBaselineTotal = 0
+        var billCurrentTotal = 0
+        
         levels.forEach { (value, currentStored) ->
             val key = "$deviceID:0"
             val baselineStored = baselineLevels[key] ?: 0
             val storedDelta = currentStored - baselineStored
-            sessionDeltaCents += value * storedDelta
+            
+            billBaselineTotal += value * baselineStored
+            billCurrentTotal += value * currentStored
+            
+            if (storedDelta > 0) {
+                sessionDeltaCents += value * storedDelta
+            } else if (storedDelta < 0) {
+                // 允许出现硬件复位/吐币导致回退，但要打日志
+                Log.w(TAG, "检测到库存回退: deviceID=$deviceID, value=${value}分, baselineStored=$baselineStored, currentStored=$currentStored, delta=$storedDelta")
+            }
         }
+        
         sessionDeltaCents = maxOf(0, sessionDeltaCents)
         
         // 详细日志（每次金额轮询）
-        Log.d(TAG, "金额轮询（兼容旧接口）: deviceID=$deviceID, sessionDeltaCents=$sessionDeltaCents, levels条目数=${levels.size}")
+        val billDelta = billCurrentTotal - billBaselineTotal
+        Log.d(TAG, "金额轮询（基于$dataSource）: deviceID=$deviceID, baselineTotalCents=$billBaselineTotal, currentTotalCents=$billCurrentTotal, sessionDeltaCents=$sessionDeltaCents, levels条目数=${levels.size}")
         
         val totalCents = getTotalCents()
         Log.d(TAG, "总金额: ${totalCents}分 (${totalCents / 100.0}元), 设备数量=${assignmentSnapshots.size}")
         
         return sessionDeltaCents
+    }
+    
+    /**
+     * 更新设备当前库存（轮询时调用）- 兼容旧接口
+     * @param deviceID 设备ID
+     * @param levelsResponse 库存响应（从 GetAllLevels 获取）
+     * @return 本次会话累计金额（分）- sessionDeltaCents
+     * @deprecated 请使用 updateFromLevels（基于 GetAllLevels）或 updateFromAssignments（基于 GetCurrencyAssignment）
+     */
+    @Deprecated("请使用 updateFromLevels 或 updateFromAssignments", ReplaceWith("updateFromLevels(deviceID, levels)"))
+    fun update(deviceID: String, levelsResponse: LevelsResponse): Int {
+        val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
+        return updateFromLevels(deviceID, levels, "LEVELS")
     }
     
     /**
@@ -311,18 +352,59 @@ class CashAmountTracker {
     }
     
     /**
-     * 获取总金额（分）- 所有设备的本次会话累计金额总和
+     * 设置设备基线库存总金额（在支付开始时调用）
+     * ⚠️ 临时方案：使用 GetCurrencyAssignment 的 stored 字段计算库存总金额
+     * 会话累计金额 = 当前库存总金额 - 基线库存总金额
+     * 
+     * @param deviceID 设备ID
+     * @param storedTotalCents 基线库存总金额（分）- 从 GetCurrencyAssignment 的 stored 计算
+     */
+    fun setBaselineStoredTotal(deviceID: String, storedTotalCents: Int) {
+        deviceBaselinePaidAmounts[deviceID] = storedTotalCents
+        devicePaidAmounts[deviceID] = storedTotalCents  // 初始时当前金额等于基线
+        Log.d(TAG, "设置设备基线库存总金额: deviceID=$deviceID, baselineStoredTotalCents=$storedTotalCents (${storedTotalCents / 100.0}€)")
+    }
+    
+    /**
+     * 更新设备当前库存总金额（轮询时调用）
+     * ⚠️ 临时方案：使用 GetCurrencyAssignment 的 stored 字段计算库存总金额
+     * 
+     * @param deviceID 设备ID
+     * @param storedTotalCents 当前库存总金额（分）- 从 GetCurrencyAssignment 的 stored 计算
+     */
+    fun updateStoredTotal(deviceID: String, storedTotalCents: Int) {
+        val previousStored = devicePaidAmounts[deviceID] ?: 0
+        devicePaidAmounts[deviceID] = storedTotalCents
+        val delta = storedTotalCents - previousStored
+        Log.d(TAG, "更新设备当前库存总金额: deviceID=$deviceID, storedTotalCents=$storedTotalCents (${storedTotalCents / 100.0}€), delta=$delta (${delta / 100.0}€)")
+    }
+    
+    /**
+     * 获取指定设备的本次会话累计收款金额（分）
+     * sessionDelta = currentPaidAmount - baselinePaidAmount
+     * @param deviceID 设备ID
+     * @return 本次会话累计收款金额（分）
+     */
+    fun getDeviceSessionCents(deviceID: String): Int {
+        val currentPaid = devicePaidAmounts[deviceID] ?: 0
+        val baselinePaid = deviceBaselinePaidAmounts[deviceID] ?: 0
+        val sessionDelta = maxOf(0, currentPaid - baselinePaid)
+        return sessionDelta
+    }
+    
+    /**
+     * 获取总金额（分）- 所有设备的本次会话累计收款金额总和
+     * ⚠️ 核心变更：不再使用库存差值，改用真实收款金额
      */
     fun getTotalCents(): Int {
-        // 计算所有设备的会话差值：Σ(value * (stored_now - stored_baseline))
+        // 计算所有设备的会话收款金额：Σ(currentPaidAmount - baselinePaidAmount)
         var totalCents = 0
-        currentLevels.forEach { (key, currentStored) ->
-            val baselineStored = baselineLevels[key] ?: 0
-            val storedDelta = currentStored - baselineStored
-            val value = valueMap[key] ?: 0
-            totalCents += value * storedDelta
+        devicePaidAmounts.forEach { (deviceID, currentPaid) ->
+            val baselinePaid = deviceBaselinePaidAmounts[deviceID] ?: 0
+            val sessionDelta = maxOf(0, currentPaid - baselinePaid)
+            totalCents += sessionDelta
         }
-        return maxOf(0, totalCents)
+        return totalCents
     }
     
     /**
@@ -333,9 +415,11 @@ class CashAmountTracker {
     }
     
     /**
-     * 获取指定设备的本次会话累计金额（分）
+     * 获取指定设备的本次会话累计金额（分）- 基于库存差值（已废弃，仅用于找零库存显示）
+     * @deprecated 请使用基于真实收款金额的 getDeviceSessionCents（已重载）
      */
-    fun getDeviceSessionCents(deviceID: String): Int {
+    @Deprecated("请使用基于真实收款金额的版本", ReplaceWith("getDeviceSessionCents(deviceID)"))
+    fun getDeviceSessionCentsFromLevels(deviceID: String): Int {
         var sessionCents = 0
         currentLevels.forEach { (key, currentStored) ->
             if (key.startsWith("$deviceID:")) {
@@ -380,20 +464,25 @@ class CashAmountTracker {
     
     /**
      * 重置所有金额（用于新的支付会话）
-     * 注意：不清除基线，基线只在断开连接时清除
+     * 注意：不清除基线收款金额，基线只在断开连接时清除
      * 重新采集基线时，会覆盖旧的基线
      */
     fun reset() {
-        Log.d(TAG, "重置金额跟踪器（清除当前库存，保留基线）")
+        Log.d(TAG, "重置金额跟踪器（清除当前收款金额，保留基线）")
+        devicePaidAmounts.clear()
+        // 保留库存相关字段（用于找零库存显示）
         currentLevels.clear()
     }
     
     /**
      * 移除指定设备（断开连接时调用）
-     * 清除基线库存和当前库存
+     * 清除基线收款金额和当前收款金额
      */
     fun removeDevice(deviceID: String) {
         Log.d(TAG, "移除设备: deviceID=$deviceID")
+        deviceBaselinePaidAmounts.remove(deviceID)
+        devicePaidAmounts.remove(deviceID)
+        // 保留库存相关字段（用于找零库存显示）
         baselineLevels.remove(deviceID)
         currentLevels.remove(deviceID)
     }

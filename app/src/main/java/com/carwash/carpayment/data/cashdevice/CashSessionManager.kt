@@ -17,13 +17,37 @@ class CashSessionManager(
     }
     
     /**
-     * 启动会话（认证 + 打开双设备连接）
+     * 预初始化会话（认证 + 打开双设备连接，但不启用收款）
+     * App 启动时调用，只完成连接，不启用接收器
+     * @return Map<String, String> 设备映射：deviceName -> deviceID
+     */
+    suspend fun prewarmSession(
+        username: String = DEFAULT_USERNAME,
+        password: String = DEFAULT_PASSWORD
+    ): Map<String, String> {
+        return openConnections(username, password, enableAcceptor = false)
+    }
+    
+    /**
+     * 启动会话（认证 + 打开双设备连接，但不启用收款）
+     * 注意：启用收款应在 beginCashSession 中通过 EnableAcceptor API 单独调用
      * @return Map<String, String> 设备映射：deviceName -> deviceID
      *         例如：{"SPECTRAL_PAYOUT-0" -> "device-id-1", "SMART_COIN_SYSTEM-1" -> "device-id-2"}
      */
     suspend fun startSession(
         username: String = DEFAULT_USERNAME,
         password: String = DEFAULT_PASSWORD
+    ): Map<String, String> {
+        return openConnections(username, password, enableAcceptor = false)
+    }
+    
+    /**
+     * 打开连接（内部方法，支持参数化启用/禁用接收器）
+     */
+    private suspend fun openConnections(
+        username: String,
+        password: String,
+        enableAcceptor: Boolean
     ): Map<String, String> {
         Log.d(TAG, "开始启动现金设备会话...")
         
@@ -96,8 +120,8 @@ class CashSessionManager(
                     ComPort = port,
                     SspAddress = sspAddress,
                     DeviceID = usbDevice.actualDeviceID,
-                    EnableAcceptor = true,
-                    EnableAutoAcceptEscrow = true,
+                    EnableAcceptor = enableAcceptor,
+                    EnableAutoAcceptEscrow = enableAcceptor,  // 只有启用接收器时才自动接受
                     EnablePayout = false
                 )
                 

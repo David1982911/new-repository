@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB 设备过滤器（可选，用于自动检测特定 USB 打印机） -->
+    <!-- 如果需要精确匹配特定打印机，可以添加 vendor-id 和 product-id -->
+    <!-- 当前配置允许所有 USB 设备 -->
+</resources>

@@ -1,0 +1,53 @@
+ECLIPSE ANDROID PROJECT IMPORT SUMMARY
+======================================
+
+Ignored Files:
+--------------
+The following files were *not* copied into the new Gradle project; you
+should evaluate whether these are still needed in your project and if
+so manually move them:
+
+* .gitignore
+* ic_launcher-web.png
+* proguard-project.txt
+
+Moved Files:
+------------
+Android Gradle projects use a different directory structure than ADT
+Eclipse projects. Here's how the projects were restructured:
+
+* AndroidManifest.xml => app\src\main\AndroidManifest.xml
+* assets\ => app\src\main\assets\
+* libs\arm64-v8a\libcompress-lib.so => app\src\main\jniLibs\arm64-v8a\libcompress-lib.so
+* libs\arm64-v8a\libserial_port.so => app\src\main\jniLibs\arm64-v8a\libserial_port.so
+* libs\armeabi-v7a\libcompress-lib.so => app\src\main\jniLibs\armeabi-v7a\libcompress-lib.so
+* libs\armeabi-v7a\libserial_port.so => app\src\main\jniLibs\armeabi-v7a\libserial_port.so
+* libs\armeabi\libcompress-lib.so => app\src\main\jniLibs\armeabi\libcompress-lib.so
+* libs\armeabi\libserial_port.so => app\src\main\jniLibs\armeabi\libserial_port.so
+* libs\mips64\libcompress-lib.so => app\src\main\jniLibs\mips64\libcompress-lib.so
+* libs\mips64\libserial_port.so => app\src\main\jniLibs\mips64\libserial_port.so
+* libs\mips\libcompress-lib.so => app\src\main\jniLibs\mips\libcompress-lib.so
+* libs\mips\libserial_port.so => app\src\main\jniLibs\mips\libserial_port.so
+* libs\printerlibs.jar => app\libs\printerlibs.jar
+* libs\simple-xml-2.7.1.jar => app\libs\simple-xml-2.7.1.jar
+* libs\x86\libcompress-lib.so => app\src\main\jniLibs\x86\libcompress-lib.so
+* libs\x86\libserial_port.so => app\src\main\jniLibs\x86\libserial_port.so
+* libs\x86_64\libcompress-lib.so => app\src\main\jniLibs\x86_64\libcompress-lib.so
+* libs\x86_64\libserial_port.so => app\src\main\jniLibs\x86_64\libserial_port.so
+* res\ => app\src\main\res\
+* src\ => app\src\main\java\
+
+Next Steps:
+-----------
+You can now build the project. The Gradle project needs network
+connectivity to download dependencies.
+
+Bugs:
+-----
+If for some reason your project does not build, and you determine that
+it is due to a bug or limitation of the Eclipse to Gradle importer,
+please file a bug at http://b.android.com with category
+Component-Tools.
+
+(This import summary is for your information only, and can be deleted
+after import once you are satisfied with the results.)

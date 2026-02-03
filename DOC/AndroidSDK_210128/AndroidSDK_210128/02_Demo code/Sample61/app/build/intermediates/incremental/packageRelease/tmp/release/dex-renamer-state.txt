@@ -1,0 +1,4 @@
+#Wed Dec 23 15:17:03 CST 2020
+base.0=G\:\\AndroidSDK_201027\\02_Demo code\\Sample61\\app\\build\\intermediates\\dex\\release\\mergeDexRelease\\out
+path.0=classes.dex
+renamed.0=classes.dex

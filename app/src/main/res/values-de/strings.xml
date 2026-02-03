@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Car Wash Payment</string>
+    <string name="app_name">Autowaschanlage Zahlung</string>
     
     <!-- 洗车程序 -->
     <string name="program_quick">Schnellwäsche</string>
@@ -26,6 +26,15 @@
     <string name="language_de">DE</string>
     <string name="language_en">EN</string>
     
+    <!-- 洗车机状态 -->
+    <string name="status_ready">Bereit</string>
+    <string name="status_fault">Fehler</string>
+    <string name="status_occupied">Besetzt</string>
+    <string name="status_not_ready">Nicht bereit</string>
+    <string name="status_unknown">Unbekannt</string>
+    <string name="status_updating">Aktualisiere...</string>
+    <string name="status_offline">Offline</string>
+    
     <!-- 页面2: 选择支付 -->
     <string name="select_payment_title">Zahlungsmethode wählen</string>
     <string name="selected_program">Ausgewähltes Programm: %1$s</string>
@@ -43,22 +52,53 @@
     <string name="washing_status_placeholder">Status: Wird verarbeitet...</string>
     <string name="button_finish">Fertig</string>
     
-    <!-- 交易列表 -->
-    <string name="transaction_list_title">Transaktionsliste</string>
-    <string name="transaction_count">Anzahl</string>
-    <string name="total_amount">Gesamtbetrag</string>
-    <string name="no_transactions">Keine Transaktionen</string>
-    <string name="payment_card_short">Karte</string>
-    <string name="payment_cash_short">Bargeld</string>
-    <string name="transaction_result_success">Erfolgreich</string>
-    <string name="transaction_result_failed">Fehlgeschlagen</string>
-    <string name="transaction_result_cancelled">Abgebrochen</string>
+    <!-- 现金支付 -->
+    <string name="cancel_payment">Zahlung abbrechen</string>
+    <string name="cash_insert_hint">Bitte kleine Scheine/Münzen einwerfen: %1$s</string>
+    <string name="cash_cannot_accept_large">Scheine/Münzen %1$s können nicht akzeptiert werden, da Wechselgeld nicht ausreicht</string>
+    <string name="cash_total_inserted">Gesamt eingeworfen: %1$s</string>
+    <string name="cash_bills_inserted">Scheine: %1$s</string>
+    <string name="cash_coins_inserted">Münzen: %1$s</string>
+    <string name="cash_refunding">Rückerstattung wird bearbeitet...</string>
+    <string name="cash_refund_success">Rückerstattung erfolgreich</string>
+    <string name="cash_refund_failed">Rückerstattung fehlgeschlagen: %1$s</string>
+    <string name="cash_target">Ziel: %1$s</string>
+    <string name="cash_paid">Bezahlt: %1$s</string>
+    <string name="cash_remaining">Verbleibend: %1$s</string>
+    <string name="cash_accepted_denominations">Akzeptierte Nennwerte: %1$s</string>
+    <string name="cash_paid_amount">Bezahlt: %1$s</string>
+    <string name="cash_remaining_amount">Verbleibend: %1$s</string>
+    <string name="cash_change_amount">Erwartetes Wechselgeld: %1$s</string>
+    <string name="cash_target_amount">Ziel: %1$s</string>
+    <string name="cash_payment_processing">Bargeldzahlung wird bearbeitet, bitte Bargeld einwerfen…</string>
+    <string name="cash_note_rejected_title">Schein nicht akzeptiert</string>
+    <string name="cash_note_rejected">Dieser Schein wird nicht akzeptiert. Bitte kleinere Scheine/Münzen verwenden oder mit Karte zahlen.</string>
+    <string name="cash_note_rejected_with_denominations">Dieser Schein wird nicht akzeptiert. Akzeptierte Scheine: %1$s. Bitte kleinere Scheine/Münzen verwenden oder mit Karte zahlen.</string>
+    <string name="cash_payment_unavailable">Bargeldzahlung derzeit nicht verfügbar. Bitte mit Karte zahlen.</string>
+    <string name="payment_success_redirecting">Zahlung erfolgreich! Weiterleitung…</string>
+    
+    <!-- 错误 -->
+    <string name="error_payment_timeout_body">Zahlung abgelaufen (nicht genug Betrag innerhalb von %1$d Sekunden). Bitte wiederholen.</string>
+    <string name="error_device_fault">Gerätefehler erkannt. Bitte Support kontaktieren.</string>
+    <string name="error_device_not_connected">Gerät nicht verbunden</string>
+    <string name="error_communication_failed">Kommunikation fehlgeschlagen</string>
+    <string name="error_carwash_comm_failed_title">Kommunikation mit der Waschanlage fehlgeschlagen</string>
+    <string name="error_carwash_comm_failed_body">Bitte prüfen Sie die RS485-Verkabelung und die Stationsadresse.</string>
+    <string name="error_check_485_wiring">Bitte prüfen Sie die RS485-Verkabelung und die Stationsadresse.</string>
+    <string name="payment_failed">Zahlung fehlgeschlagen</string>
+    <string name="payment_failed_retry">Wiederholen</string>
+    <string name="button_cancel">Abbrechen</string>
     <string name="button_back">Zurück</string>
-    <string name="button_export_csv">CSV exportieren</string>
-    <string name="export_csv_success">CSV erfolgreich exportiert</string>
-    <string name="export_csv_failed">CSV-Export fehlgeschlagen</string>
-    <string name="button_export_excel">Excel exportieren</string>
-    <string name="export_excel_success">Excel erfolgreich exportiert</string>
-    <string name="export_excel_failed">Excel-Export fehlgeschlagen</string>
-    <string name="export_no_data">Keine Daten zum Exportieren</string>
+    
+    <!-- Change Error -->
+    <string name="error_change_insufficient">Wechselgeld nicht verfügbar. Bitte Personal rufen.</string>
+    <string name="error_change_failed">Wechselgeld fehlgeschlagen. Manuelle Intervention erforderlich.</string>
+    <string name="error_change_levels_unavailable">Wechselgeldbestand nicht verfügbar. Bitte Personal rufen.</string>
+    <string name="error_counters_parse_failed">Zahlungsbetrag kann nicht gelesen werden. Bitte Geräteverbindung prüfen oder Support kontaktieren.</string>
+    <string name="device_test_baseline_info">Baseline: %1$s € | Current: %2$s € | Delta: %3$s €</string>
+    <string name="device_test_reset_baseline">Sitzungsbaseline zurücksetzen</string>
+    <string name="device_test_reset_baseline_hint">Baseline auf aktuellen Wert setzen (Delta wird null)</string>
+    <string name="device_test_session_reset">Sitzung zurückgesetzt. Bitte Münzen/Scheine erneut einwerfen.</string>
+    <string name="error_counters_read_failed">Gerätestatus kann nicht gelesen werden. Bitte wiederholen.</string>
+    <string name="device_test_reset_cash_baseline">Cash Baseline zurücksetzen</string>
 </resources>

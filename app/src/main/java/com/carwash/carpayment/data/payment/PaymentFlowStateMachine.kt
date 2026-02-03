@@ -28,10 +28,12 @@ class PaymentFlowStateMachine {
             PaymentFlowStatus.PAYING,
             PaymentFlowStatus.NOT_STARTED
         ),
-        // 支付中 -> 成功/失败
+        // 支付中 -> 成功/失败/取消/已取消且退款完成
         PaymentFlowStatus.PAYING to setOf(
             PaymentFlowStatus.SUCCESS,
-            PaymentFlowStatus.FAILED
+            PaymentFlowStatus.FAILED,
+            PaymentFlowStatus.CANCELLED,
+            PaymentFlowStatus.CANCELLED_REFUNDED  // ⚠️ 关键修复：已取消且退款完成
         ),
         // 成功 -> 启动洗车/等待/选择方式（重试）
         PaymentFlowStatus.SUCCESS to setOf(
@@ -41,6 +43,11 @@ class PaymentFlowStateMachine {
         ),
         // 失败 -> 选择方式（重试）/未开始（取消）
         PaymentFlowStatus.FAILED to setOf(
+            PaymentFlowStatus.SELECTING_METHOD,  // 允许从失败状态回到选择方式（重试）
+            PaymentFlowStatus.NOT_STARTED
+        ),
+        // 取消 -> 选择方式/未开始
+        PaymentFlowStatus.CANCELLED to setOf(
             PaymentFlowStatus.SELECTING_METHOD,
             PaymentFlowStatus.NOT_STARTED
         ),
@@ -89,6 +96,8 @@ class PaymentFlowStateMachine {
             selectedPaymentMethod = currentState.selectedPaymentMethod,
             paymentConfirmed = currentState.paymentConfirmed,
             errorMessage = errorMessage,
+            paidAmountCents = currentState.paidAmountCents,
+            targetAmountCents = currentState.targetAmountCents,
             lastUpdated = System.currentTimeMillis()
         )
     }
@@ -96,10 +105,17 @@ class PaymentFlowStateMachine {
     /**
      * 开始支付流程（从未开始转为选择方式）
      */
-    fun startPaymentFlow(program: WashProgram): PaymentFlowState {
+    fun startPaymentFlow(program: WashProgram, currentState: PaymentFlowState? = null): PaymentFlowState? {
+        // ⚠️ SUCCESS 状态下忽略开始支付操作，避免误报
+        if (currentState?.status == PaymentFlowStatus.SUCCESS) {
+            Log.d(TAG, "SUCCESS 状态下忽略开始支付操作（已完成支付）")
+            return null
+        }
         return PaymentFlowState(
             status = PaymentFlowStatus.SELECTING_METHOD,
             selectedProgram = program,
+            paidAmountCents = 0,
+            targetAmountCents = 0,
             lastUpdated = System.currentTimeMillis()
         )
     }
@@ -125,6 +141,11 @@ class PaymentFlowStateMachine {
      * 确认支付（从选择方式转为支付中）
      */
     fun confirmPayment(currentState: PaymentFlowState): PaymentFlowState? {
+        // ⚠️ SUCCESS 状态下忽略所有支付操作，避免误报
+        if (currentState.status == PaymentFlowStatus.SUCCESS) {
+            Log.d(TAG, "SUCCESS 状态下忽略确认支付操作（已完成支付）")
+            return null
+        }
         if (currentState.status != PaymentFlowStatus.SELECTING_METHOD) {
             Log.w(TAG, "无法确认支付，当前状态: ${currentState.status}")
             return null
@@ -151,11 +172,27 @@ class PaymentFlowStateMachine {
      * 支付失败（从支付中转为失败）
      */
     fun paymentFailed(currentState: PaymentFlowState, errorMessage: String): PaymentFlowState? {
+        // ⚠️ SUCCESS 状态下忽略支付失败操作，避免误报
+        if (currentState.status == PaymentFlowStatus.SUCCESS) {
+            Log.d(TAG, "SUCCESS 状态下忽略支付失败操作（已完成支付）")
+            return null
+        }
         if (currentState.status != PaymentFlowStatus.PAYING) {
             Log.w(TAG, "无法标记支付失败，当前状态: ${currentState.status}")
             return null
         }
         return transition(currentState, PaymentFlowStatus.FAILED, errorMessage)
+    }
+    
+    /**
+     * 支付取消（从支付中转为取消）
+     */
+    fun paymentCancelled(currentState: PaymentFlowState, reason: String? = null): PaymentFlowState? {
+        if (currentState.status != PaymentFlowStatus.PAYING) {
+            Log.w(TAG, "无法标记支付取消，当前状态: ${currentState.status}")
+            return null
+        }
+        return transition(currentState, PaymentFlowStatus.CANCELLED, reason)
     }
     
     /**
@@ -178,6 +215,34 @@ class PaymentFlowStateMachine {
             return null
         }
         return transition(currentState, PaymentFlowStatus.WAITING)
+    }
+    
+    /**
+     * 重置到选择支付方式（从失败或其他状态回到选择方式）
+     * 允许用户在支付失败后重新选择支付方式
+     */
+    fun resetToSelecting(currentState: PaymentFlowState): PaymentFlowState? {
+        // 允许从 FAILED、SUCCESS、WAITING 等状态回到 SELECTING_METHOD
+        if (currentState.status == PaymentFlowStatus.SELECTING_METHOD) {
+            // 已经在选择方式状态，不需要转换
+            return currentState
+        }
+        
+        // 尝试转换到 SELECTING_METHOD
+        if (canTransition(currentState.status, PaymentFlowStatus.SELECTING_METHOD)) {
+            return transition(currentState, PaymentFlowStatus.SELECTING_METHOD)
+        }
+        
+        // 如果无法直接转换，先转到 NOT_STARTED，再转到 SELECTING_METHOD
+        if (canTransition(currentState.status, PaymentFlowStatus.NOT_STARTED)) {
+            val intermediateState = transition(currentState, PaymentFlowStatus.NOT_STARTED)
+            if (canTransition(PaymentFlowStatus.NOT_STARTED, PaymentFlowStatus.SELECTING_METHOD)) {
+                return transition(intermediateState, PaymentFlowStatus.SELECTING_METHOD)
+            }
+        }
+        
+        Log.w(TAG, "无法重置到选择支付方式，当前状态: ${currentState.status}")
+        return null
     }
     
     /**
@@ -225,5 +290,32 @@ class PaymentFlowStateMachine {
             return null
         }
         return transition(currentState, PaymentFlowStatus.SELECTING_METHOD)
+    }
+    
+    /**
+     * 强制重置到初始状态（NOT_STARTED）
+     * 用于在返回主界面时清空所有状态，允许开始新的支付流程
+     * @param currentState 当前状态
+     * @return 重置后的状态（NOT_STARTED）
+     */
+    /**
+     * 强制重置到未开始状态
+     * ⚠️ 关键修复：不清空 selectedProgram 和 selectedPaymentMethod，避免白屏
+     * @param currentState 当前状态
+     * @return 重置后的状态（保留 selectedProgram 和 selectedPaymentMethod）
+     */
+    fun forceResetToNotStarted(currentState: PaymentFlowState): PaymentFlowState {
+        Log.d(TAG, "强制重置到 NOT_STARTED: ${currentState.status} -> NOT_STARTED")
+        // ⚠️ 关键修复：不清空 selectedProgram 和 selectedPaymentMethod，避免白屏
+        return PaymentFlowState(
+            status = PaymentFlowStatus.NOT_STARTED,
+            selectedProgram = currentState.selectedProgram,  // ⚠️ 保留选择，避免白屏
+            selectedPaymentMethod = currentState.selectedPaymentMethod,  // ⚠️ 保留支付方式，避免白屏
+            paymentConfirmed = false,
+            errorMessage = null,
+            paidAmountCents = 0,
+            targetAmountCents = 0,
+            lastUpdated = System.currentTimeMillis()
+        )
     }
 }

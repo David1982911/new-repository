@@ -26,11 +26,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalConfiguration
+import com.carwash.carpayment.BuildConfig
 import com.carwash.carpayment.R
 import com.carwash.carpayment.data.WashProgram
+import com.carwash.carpayment.data.carwash.CarWashGateCheckResult
 import com.carwash.carpayment.ui.theme.KioskCardSizes
 import com.carwash.carpayment.ui.viewmodel.HomeViewModel
 import com.carwash.carpayment.ui.viewmodel.LanguageViewModel
+import com.carwash.carpayment.ui.viewmodel.PaymentViewModel
 
 /**
  * 页面1: 首页（选择洗车程序）
@@ -41,14 +45,31 @@ fun SelectProgramScreen(
     languageViewModel: LanguageViewModel,
     onProgramSelected: (String) -> Unit,
     onShowTransactionList: () -> Unit = {},
-    onShowDeviceTest: () -> Unit = {}
+    onShowDeviceTest: () -> Unit = {},
+    paymentViewModel: PaymentViewModel? = null  // 可选，用于显示 GateCheck 错误
 ) {
     val programs by homeViewModel.programs.collectAsState()
     val currentLanguage by languageViewModel.currentLanguage.collectAsState()
+    val gateCheckResult: CarWashGateCheckResult? = if (paymentViewModel != null) {
+        val result by paymentViewModel.gateCheckResult.collectAsState()
+        result
+    } else {
+        null
+    }
     
     // 隐藏入口：连续点击 Logo 5 次
     var logoClickCount by remember { mutableLongStateOf(0L) }
     var lastClickTime by remember { mutableLongStateOf(0L) }
+    
+    // ⚠️ 打点：打印价格来源（定位UI显示的价格到底从哪里来）
+    Log.d("ProgramPrice", "========== SelectProgramScreen 价格来源 ==========")
+    Log.d("ProgramPrice", "source=HomeViewModel.programs (来自 ProgramConfigRepository.configFlow)")
+    Log.d("ProgramPrice", "programs=${programs.map { "${it.id}: price=${it.price}€ (${(it.price * 100).toInt()}分)" }}")
+    Log.d("ProgramPrice", "programsCount=${programs.size}")
+    programs.forEach { program ->
+        Log.d("ProgramPrice", "  - id=${program.id}, name=${program.name}, price=${program.price}€, priceCents=${(program.price * 100).toInt()}")
+    }
+    Log.d("ProgramPrice", "================================================")
     
     Log.d("SelectProgramScreen", "渲染首页，程序数量: ${programs.size}, 当前语言: $currentLanguage")
     
@@ -110,8 +131,71 @@ fun SelectProgramScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
         
+        // GateCheck 失败提示（如果存在）
+        gateCheckResult?.let { result ->
+            if (result is CarWashGateCheckResult.Failed) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "⚠",
+                            fontSize = 48.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        // 根据错误原因映射到 stringResource
+                        val configuration = LocalConfiguration.current
+                        val currentLang = configuration.locales[0].language
+                        val errorTitle = when (result.reason) {
+                            com.carwash.carpayment.data.carwash.CarWashGateCheckFailureReason.COMMUNICATION_FAILED -> {
+                                Log.e("I18N_CHECK", "showError=COMMUNICATION_FAILED lang=$currentLang")
+                                Log.d("BUILD_MARK", "I18N_CarWash_Error_Resource_OK_20260128")
+                                stringResource(R.string.error_carwash_comm_failed_title)
+                            }
+                            com.carwash.carpayment.data.carwash.CarWashGateCheckFailureReason.NOT_CONNECTED -> {
+                                Log.e("I18N_CHECK", "showError=NOT_CONNECTED lang=$currentLang")
+                                stringResource(R.string.error_device_not_connected)
+                            }
+                            else -> result.message  // 向后兼容
+                        }
+                        val errorBody = when (result.reason) {
+                            com.carwash.carpayment.data.carwash.CarWashGateCheckFailureReason.COMMUNICATION_FAILED -> {
+                                stringResource(R.string.error_carwash_comm_failed_body)
+                            }
+                            else -> stringResource(R.string.error_check_485_wiring)
+                        }
+                        Text(
+                            text = errorTitle,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = errorBody,
+                            style = MaterialTheme.typography.bodyLarge,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+            }
+        }
+        
         // 底部提示
         BottomHint()
+        
+        // 构建信息显示（开发阶段可见）
+        BuildInfoDisplay()
     }
 }
 
@@ -331,6 +415,28 @@ private fun BottomHint() {
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
+ * 构建信息显示（开发阶段可见）
+ */
+@Composable
+private fun BuildInfoDisplay() {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    ) {
+        Text(
+            text = "Build ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · ${BuildConfig.BUILD_TIME}",
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.bodySmall,
+            fontSize = 10.sp,
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
         )
     }
 }

@@ -12,6 +12,8 @@ data class PaymentFlowState(
     val selectedPaymentMethod: PaymentMethod? = null,  // 选中的支付方式
     val paymentConfirmed: Boolean = false,      // 支付确认
     val errorMessage: String? = null,           // 错误信息（如果失败）
+    val paidAmountCents: Int = 0,              // 已收金额（分）- 用于 UI 显示
+    val targetAmountCents: Int = 0,             // 目标金额（分）- 用于 UI 显示
     val lastUpdated: Long = System.currentTimeMillis()  // 最后更新时间
 ) {
     /**

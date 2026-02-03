@@ -114,12 +114,14 @@ interface CashDeviceApi {
      * 获取计数器（收款金额统计）
      * GET /CashDevice/GetCounters?deviceID={deviceID}
      * Authorization 头由 Interceptor 自动添加
-     * 用于获取当前已收金额（从 SSP 事件解析面额）
+     * 
+     * ⚠️ 注意：服务端返回的是文本格式（如 "Stacked: 76 / Stored: 42"），不是 JSON
+     * 需要使用 Response<ResponseBody> 接收原始文本，然后手动解析
      */
     @GET("CashDevice/GetCounters")
     suspend fun getCounters(
         @Query("deviceID") deviceID: String
-    ): CountersResponse
+    ): Response<ResponseBody>
     
     /**
      * 获取所有面额库存（各面额的 Stored 数量）
@@ -157,6 +159,20 @@ interface CashDeviceApi {
     ): Response<ResponseBody>
     
     /**
+     * 启用找零设备（已验证的 REST 调用方式）
+     * POST /CashDevice/EnablePayoutDevice?deviceID={deviceID}
+     * Authorization 头由 Interceptor 自动添加
+     * Content-Type: application/x-www-form-urlencoded
+     * Body: 空（或空表单）
+     * 用于启用设备的找零功能（SPECTRAL_PAYOUT 连接成功后调用）
+     */
+    @POST("CashDevice/EnablePayoutDevice")
+    @Headers("Content-Type: application/x-www-form-urlencoded")
+    suspend fun enablePayoutDevice(
+        @Query("deviceID") deviceID: String
+    ): Response<ResponseBody>
+    
+    /**
      * 禁用找零
      * POST /CashDevice/DisablePayout?deviceID={deviceID}
      * Authorization 头由 Interceptor 自动添加
@@ -171,8 +187,9 @@ interface CashDeviceApi {
      * 设置面额接收（逐个面额设置"是否允许接收"）
      * POST /CashDevice/SetInhibits?deviceID={deviceID}
      * Authorization 头由 Interceptor 自动添加
-     * 厂商确认：SetInhibits 是设置可接收面额，要逐个面额配置
-     * 约定：Inhibit = true 表示禁止接收该面额；Inhibit = false 表示允许接收该面额
+     * 
+     * ⚠️ DEPRECATED: 服务器不存在该端点，调用会返回 404
+     * 请使用 setDenominationInhibits() 替代
      * 
      * 请求体格式（按厂商文档）：
      * {
@@ -181,13 +198,16 @@ interface CashDeviceApi {
      *     { "Denomination": 5000, "Inhibit": false }   // 允许接收 50€
      *   ]
      * }
+     * 
+     * ⚠️ 已删除：服务器返回 404，已统一改用 setDenominationInhibits()
      */
-    @POST("CashDevice/SetInhibits")
-    @Headers("Content-Type: application/json")
-    suspend fun setInhibits(
-        @Query("deviceID") deviceID: String,
-        @Body request: SetInhibitsRequest
-    ): Response<ResponseBody>
+    // @Deprecated("Server does not expose /CashDevice/SetInhibits (404). Use setDenominationInhibits() instead", ReplaceWith("setDenominationInhibits(deviceID, request)"))
+    // @POST("CashDevice/SetInhibits")
+    // @Headers("Content-Type: application/json")
+    // suspend fun setInhibits(
+    //     @Query("deviceID") deviceID: String,
+    //     @Body request: SetInhibitsRequest
+    // ): Response<ResponseBody>
     
     /**
      * 设置单个面额路由（在线配置，不导致连接断开）
@@ -480,20 +500,37 @@ data class DeviceStatusResponse(
 /**
  * 计数器响应（收款金额统计）
  * 从 GetCounters API 返回的金额信息
+ * 修复"50€漏记"：包含所有计数项（stacked, stored, rejected等）
  */
 @Serializable
 data class CountersResponse(
     val deviceID: String? = null,
-    val stackedTotalCents: Int = 0,  // 已收总金额（分）
-    val stackedTotal: Double = 0.0,  // 已收总金额（元，可选字段）
+    val stackedTotalCents: Int = 0,  // Stacked 总金额（分）
+    val stackedTotal: Double = 0.0,  // Stacked 总金额（元，可选字段）
     val stackedCounts: Map<String, Int>? = null,  // 各面额数量（可选）
+    
+    // 扩展字段：所有可能代表收入的计数项
+    val stacked: Int = 0,  // Stacked 数量（张/枚）
+    val stored: Int = 0,  // Stored 数量（张/枚）
+    val rejected: Int = 0,  // Rejected 数量（张/枚，被拒收的）
+    val coinsPaidIn: Int = 0,  // Coins paid in 数量（枚）
+    
+    // 各计数项的金额（分）- 需要结合面额信息计算
+    val stackedCents: Int = 0,  // Stacked 金额（分）
+    val storedCents: Int = 0,  // Stored 金额（分）
+    val rejectedCents: Int = 0,  // Rejected 金额（分）
+    val coinsPaidInCents: Int = 0,  // Coins paid in 金额（分）
+    
+    // 总收款金额（分）- 所有计数项的总和
+    val totalReceivedCents: Int = 0,  // 总收款金额（分）= stackedCents + storedCents + coinsPaidInCents
+    
     val error: String? = null
 ) {
     /**
      * 获取已收总金额（元）
      */
     val totalAmount: Double
-        get() = stackedTotal.takeIf { it > 0 } ?: (stackedTotalCents / 100.0)
+        get() = stackedTotal.takeIf { it > 0 } ?: (totalReceivedCents / 100.0)
 }
 
 /**
@@ -560,9 +597,18 @@ data class LevelsResponse(
  * - 不包含 ValueCountryCode 嵌套层
  * - 不包含 Fraud_Attempt_Value 和 Calibration_Failed_Value 字段
  */
+/**
+ * SetDenominationRoute 请求体（扁平格式）
+ * ⚠️ 金额单位确认：Value 字段为 cents（分），不是欧元金额
+ * ⚠️ 请求体格式：{"Value": valueCents, "CountryCode": "EUR", "Route": route}
+ * 
+ * @param value 面额（分），例如：100=1€，200=2€，500=5€，1000=10€
+ * @param countryCode 货币代码（如 "EUR"）
+ * @param route 路由：0=CASHBOX（不可找零），1=RECYCLER（可找零）
+ */
 @Serializable
 data class SetDenominationRouteRequestFlat(
-    @SerialName("Value") val value: Int,  // 面额（分），如 1000 表示 10€
+    @SerialName("Value") val value: Int,  // ⚠️ 金额单位：cents（分），例如 1000 表示 10€
     @SerialName("CountryCode") val countryCode: String,  // 货币代码（如 "EUR"）
     @SerialName("Route") val route: Int  // 路由：0=CASHBOX（不可找零），1=RECYCLER（可找零）
 )
@@ -593,12 +639,16 @@ data class SetDenominationRouteRequest(
 /**
  * 设置单个面额接收状态请求（使用 SetDenominationInhibits）
  * SetDenominationInhibits 接口的请求体
- * 服务端期望格式：{"ValueCountryCodes":["500 EUR"],"Inhibit":false}
- * ValueCountryCodes 是字符串数组，格式为 "500 EUR" / "1000 EUR"
+ * ⚠️ 金额单位确认：ValueCountryCodes 字符串数组中的数值为 cents（分），不是欧元金额
+ * ⚠️ 服务端期望格式：{"ValueCountryCodes":["500 EUR"],"Inhibit":false}
+ * ⚠️ 注意：字符串 "500 EUR" 中的 500 表示 500分=5€，不是 500€
+ * 
+ * @param valueCountryCodes 字符串数组，格式："500 EUR"（500=5€），"1000 EUR"（1000=10€）
+ * @param inhibit false=允许接收，true=禁止接收
  */
 @Serializable
 data class SetDenominationInhibitsRequest(
-    @SerialName("ValueCountryCodes") val valueCountryCodes: List<String>,  // 字符串数组，格式："500 EUR"
+    @SerialName("ValueCountryCodes") val valueCountryCodes: List<String>,  // ⚠️ 字符串数组，格式："500 EUR"（500=5€，数值为 cents）
     @SerialName("Inhibit") val inhibit: Boolean  // false=允许接收，true=禁止接收
 )
 
@@ -616,10 +666,19 @@ data class SetDenominationInhibitRequest(
 /**
  * 找零请求
  */
+/**
+ * DispenseValue 请求体
+ * ⚠️ 金额单位确认：Value 字段为 cents（分），不是欧元金额
+ * ⚠️ SMART_COIN_SYSTEM-1 现场验证：Value=100→1€，Value=200→2€
+ * ⚠️ SPECTRAL_PAYOUT-0 现场验证：Value=500→5€，Value=1000→10€
+ * 
+ * @param value 找零金额（分），例如：100=1€，200=2€，500=5€，1000=10€
+ * @param countryCode 货币代码，默认 "EUR"
+ */
 @Serializable
 data class DispenseValueRequest(
-    @SerialName("Value") val value: Int,  // 找零金额（分），如 200 表示 2€
-    @SerialName("CountryCode") val countryCode: String = "EUR"  // 货币代码，默认 EUR
+    @SerialName("Value") val value: Int,  // ⚠️ 金额单位：cents（分），例如 200 表示 2€
+    @SerialName("CountryCode") val countryCode: String  // ⚠️ 关键修复：移除默认值，确保始终序列化 CountryCode
 )
 
 /**

@@ -32,28 +32,28 @@ class ProgramConfigRepository(private val context: Context) {
     companion object {
         private const val TAG = "ProgramConfigRepository"
         
-        // 默认配置
+        // 默认配置（价格统一调整为 5€/10€/15€，方便测试）
         private val DEFAULT_CONFIG = WashProgramConfigList(
             programs = listOf(
                 WashProgramConfig(
                     id = "quick",
                     nameKey = "program_quick",
                     minutes = 5,
-                    price = 3.50,
+                    price = 5.00,  // 基础套餐：5 欧元（500 分）
                     addons = listOf("Basisreinigung", "Trocknung")
                 ),
                 WashProgramConfig(
                     id = "standard",
                     nameKey = "program_standard",
                     minutes = 10,
-                    price = 6.00,
+                    price = 10.00,  // 标准套餐：10 欧元（1000 分）
                     addons = listOf("Basisreinigung", "Trocknung", "Felgenreinigung", "Wachsbehandlung")
                 ),
                 WashProgramConfig(
                     id = "premium",
                     nameKey = "program_premium",
                     minutes = 15,
-                    price = 10.00,
+                    price = 15.00,  // 高级套餐：15 欧元（1500 分）
                     addons = listOf(
                         "Basisreinigung",
                         "Trocknung",
@@ -74,13 +74,27 @@ class ProgramConfigRepository(private val context: Context) {
         val configJson = preferences[CONFIG_KEY]
         if (configJson != null) {
             try {
-                Json.decodeFromString<WashProgramConfigList>(configJson)
+                val loadedConfig = Json.decodeFromString<WashProgramConfigList>(configJson)
+                Log.d(TAG, "========== ProgramConfigRepository 从 DataStore 加载配置 ==========")
+                Log.d(TAG, "source=DataStore (本地持久化存储)")
+                Log.d(TAG, "loadedConfig.programs=${loadedConfig.programs.map { "${it.id}: price=${it.price}€ (${(it.price * 100).toInt()}分)" }}")
+                Log.d(TAG, "⚠️ 注意：如果这里显示旧价格，说明 DataStore 中保存了旧配置，需要清除缓存或重置")
+                Log.d(TAG, "================================================================")
+                loadedConfig
             } catch (e: Exception) {
                 Log.e(TAG, "解析配置失败，使用默认配置", e)
+                Log.d(TAG, "========== ProgramConfigRepository 使用默认配置 ==========")
+                Log.d(TAG, "source=DEFAULT_CONFIG (硬编码默认值)")
+                Log.d(TAG, "DEFAULT_CONFIG.programs=${DEFAULT_CONFIG.programs.map { "${it.id}: price=${it.price}€ (${(it.price * 100).toInt()}分)" }}")
+                Log.d(TAG, "======================================================")
                 DEFAULT_CONFIG
             }
         } else {
             // 首次使用，保存默认配置
+            Log.d(TAG, "========== ProgramConfigRepository 首次使用，保存默认配置 ==========")
+            Log.d(TAG, "source=DEFAULT_CONFIG (硬编码默认值，首次保存到 DataStore)")
+            Log.d(TAG, "DEFAULT_CONFIG.programs=${DEFAULT_CONFIG.programs.map { "${it.id}: price=${it.price}€ (${(it.price * 100).toInt()}分)" }}")
+            Log.d(TAG, "==============================================================")
             saveConfig(DEFAULT_CONFIG)
             DEFAULT_CONFIG
         }
