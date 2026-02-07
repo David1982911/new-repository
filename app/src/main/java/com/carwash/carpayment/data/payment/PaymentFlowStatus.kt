@@ -10,6 +10,8 @@ enum class PaymentFlowStatus {
     SUCCESS,           // 成功
     FAILED,            // 失败
     CANCELLED,         // 已取消
+    SHOW_CANCEL_CONFIRM, // ⚠️ 关键修复：显示取消确认对话框
+    CANCELLED_REFUNDING, // ⚠️ 关键修复：取消中，正在退款
     CANCELLED_REFUNDED, // ⚠️ 关键修复：已取消且退款完成（remaining=0）
     STARTING_WASH,      // 启动洗车
     WAITING            // 等待（洗车机不空闲）

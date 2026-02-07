@@ -10,6 +10,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -40,9 +43,20 @@ fun SelectPaymentScreen(
     
     // Snackbar 宿主状态
     val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+    
+    // ⚠️ 关键修复：取消确认对话框状态（基于状态机状态）
+    val showCancelConfirmDialog = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SHOW_CANCEL_CONFIRM
+    val isRefunding = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.CANCELLED_REFUNDING
+    
+    // ⚠️ 关键修复：取消确认对话框显示时，禁止返回键关闭（避免误操作）
+    BackHandler(enabled = showCancelConfirmDialog) {
+        Log.d("SelectPaymentScreen", "取消确认对话框显示时，返回键被拦截（禁止关闭）")
+        // 不执行任何操作，保持对话框显示
+    }
     
     // ⚠️ SUCCESS 状态下：BackHandler 直接导航回 Home 并清栈，不调用 cancelPaymentAndReturnHome（避免重置状态）
-    BackHandler(enabled = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SUCCESS) {
+    BackHandler(enabled = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SUCCESS && !showCancelConfirmDialog) {
         Log.d("SelectPaymentScreen", "SUCCESS 状态下 BackHandler：直接导航回 Home 并清栈")
         onBackToHome()
     }
@@ -114,18 +128,21 @@ fun SelectPaymentScreen(
                     if (flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SUCCESS) {
                         Log.d("SelectPaymentScreen", "SUCCESS 状态下返回：直接导航回 Home 并清栈")
                         onBackToHome()
+                    } else if (flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.CANCELLED_REFUNDING) {
+                        // 退款中，禁用按钮
+                        Log.d("SelectPaymentScreen", "退款中，禁止取消")
                     } else {
-                        // 非 SUCCESS 状态：正常取消流程
-                        viewModel.cancelPaymentAndReturnHome()
-                        onBackToHome()
+                        // ⚠️ 关键修复：统一取消入口
+                        viewModel.onUserCancelRequested(source = "PAYMENT")
                     }
                 },
+                enabled = !isRefunding,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.secondary
                 )
             ) {
                 Text(
-                    text = stringResource(R.string.button_back),
+                    text = if (isRefunding) "Refunding..." else stringResource(R.string.button_back),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -429,6 +446,8 @@ fun SelectPaymentScreen(
                 // 重试按钮（支付失败时显示）
                 Button(
                     onClick = {
+                        // ⚠️ 关键修复：添加 UI_RETRY_CLICKED 日志
+                        android.util.Log.d("UI_RETRY_CLICKED", "UI_RETRY_CLICKED")
                         Log.d("SelectPaymentScreen", "重试支付")
                         viewModel.retryPayment()
                     },
@@ -497,6 +516,98 @@ fun SelectPaymentScreen(
         hostState = snackbarHostState,
         modifier = Modifier.align(Alignment.BottomCenter)
     )
+    
+    // ⚠️ 关键修复：取消确认对话框（大、醒目、覆盖当前页面）
+    if (showCancelConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                // ⚠️ 关键修复：禁止点击遮罩自动关闭（dismissOnClickOutside=false）
+                // 用户必须明确选择"继续支付"或"确认取消"
+                // 不执行任何操作，保持对话框显示
+            },
+            modifier = Modifier.fillMaxWidth(0.9f),  // ⚠️ 宽度：占屏幕 75%~90%
+            title = {
+                Text(
+                    text = stringResource(R.string.cancel_payment_title),
+                    style = MaterialTheme.typography.headlineLarge.copy(fontSize = 28.sp),  // ⚠️ 标题大字号（28sp）
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .padding(vertical = 16.dp)
+                        .fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = stringResource(R.string.cancel_payment_body),
+                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = 20.sp),  // ⚠️ 正文清晰（20sp）
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    )
+                    val paidAmount = flowState.paidAmountCents / 100.0
+                    if (paidAmount > 0) {
+                        Text(
+                            text = "Amount to refund: €${String.format("%.2f", paidAmount)}",
+                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp),
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                // ⚠️ 关键修复：两个大按钮、间距大、对比强烈
+                Button(
+                    onClick = {
+                        // 确认取消并退款，执行退款
+                        coroutineScope.launch {
+                            viewModel.confirmCancelAndRefund()
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)  // ⚠️ 大按钮
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error  // ⚠️ 对比强烈（错误色）
+                    )
+                ) {
+                    Text(
+                        text = stringResource(R.string.cancel_payment_confirm),
+                        style = MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                // ⚠️ 关键修复：两个大按钮、间距大、对比强烈
+                Button(
+                    onClick = {
+                        // 用户选择继续支付，回到 PAYING 状态
+                        viewModel.onUserCancelDismissed()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)  // ⚠️ 大按钮
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary  // ⚠️ 对比强烈（主色）
+                    )
+                ) {
+                    Text(
+                        text = stringResource(R.string.cancel_payment_continue),
+                        style = MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        )
+    }
     
     // 大字体拒收提示对话框（5秒自动关闭）
     noteRejectionMessage?.let { hint ->

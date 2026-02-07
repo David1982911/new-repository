@@ -28,18 +28,31 @@ class PaymentFlowStateMachine {
             PaymentFlowStatus.PAYING,
             PaymentFlowStatus.NOT_STARTED
         ),
-        // 支付中 -> 成功/失败/取消/已取消且退款完成
+        // 支付中 -> 成功/失败/取消/显示取消确认/取消中（退款中）/已取消且退款完成
         PaymentFlowStatus.PAYING to setOf(
             PaymentFlowStatus.SUCCESS,
             PaymentFlowStatus.FAILED,
             PaymentFlowStatus.CANCELLED,
+            PaymentFlowStatus.SHOW_CANCEL_CONFIRM,  // ⚠️ 关键修复：显示取消确认对话框
+            PaymentFlowStatus.CANCELLED_REFUNDING,  // ⚠️ 关键修复：取消中，正在退款
             PaymentFlowStatus.CANCELLED_REFUNDED  // ⚠️ 关键修复：已取消且退款完成
+        ),
+        // 显示取消确认 -> 取消中（退款中）/取消（用户取消确认）
+        PaymentFlowStatus.SHOW_CANCEL_CONFIRM to setOf(
+            PaymentFlowStatus.CANCELLED_REFUNDING,
+            PaymentFlowStatus.CANCELLED
+        ),
+        // 取消中（退款中） -> 已取消且退款完成/失败
+        PaymentFlowStatus.CANCELLED_REFUNDING to setOf(
+            PaymentFlowStatus.CANCELLED_REFUNDED,
+            PaymentFlowStatus.FAILED
         ),
         // 成功 -> 启动洗车/等待/选择方式（重试）
         PaymentFlowStatus.SUCCESS to setOf(
             PaymentFlowStatus.STARTING_WASH,
             PaymentFlowStatus.WAITING,
-            PaymentFlowStatus.SELECTING_METHOD  // 允许从成功状态回到选择方式（用于重试或取消）
+            PaymentFlowStatus.SELECTING_METHOD,  // 允许从成功状态回到选择方式（用于重试或取消）
+            PaymentFlowStatus.NOT_STARTED  // ⚠️ 关键修复：允许从成功状态回到未开始（支付完成后返回首页）
         ),
         // 失败 -> 选择方式（重试）/未开始（取消）
         PaymentFlowStatus.FAILED to setOf(
@@ -159,13 +172,28 @@ class PaymentFlowStateMachine {
     
     /**
      * 支付成功（从支付中转为成功）
+     * ⚠️ 关键修复：必须返回非 null 的下一状态；允许从 PAYING 或 CANCELLED_REFUNDING 转换到 SUCCESS
      */
     fun paymentSuccess(currentState: PaymentFlowState): PaymentFlowState? {
-        if (currentState.status != PaymentFlowStatus.PAYING) {
+        // ⚠️ 关键修复：允许从 PAYING 或 CANCELLED_REFUNDING 转换到 SUCCESS（找零成功后可能处于这些状态）
+        if (currentState.status != PaymentFlowStatus.PAYING && 
+            currentState.status != PaymentFlowStatus.CANCELLED_REFUNDING) {
             Log.w(TAG, "无法标记支付成功，当前状态: ${currentState.status}")
+            // ⚠️ 关键修复：如果当前状态不是 PAYING，尝试强制转换到 SUCCESS（用于找零成功后的状态转换）
+            if (canTransition(currentState.status, PaymentFlowStatus.SUCCESS)) {
+                Log.d(TAG, "允许从 ${currentState.status} 转换到 SUCCESS（找零成功后）")
+                return transition(currentState, PaymentFlowStatus.SUCCESS)
+            }
             return null
         }
-        return transition(currentState, PaymentFlowStatus.SUCCESS)
+        val result = transition(currentState, PaymentFlowStatus.SUCCESS)
+        // ⚠️ 关键日志：记录状态转换结果
+        if (result != null) {
+            Log.d(TAG, "状态转换成功: ${currentState.status} -> ${result.status}")
+        } else {
+            Log.e(TAG, "⚠️ 严重错误：状态转换失败，transition 返回 null: ${currentState.status} -> SUCCESS")
+        }
+        return result
     }
     
     /**
@@ -306,11 +334,12 @@ class PaymentFlowStateMachine {
      */
     fun forceResetToNotStarted(currentState: PaymentFlowState): PaymentFlowState {
         Log.d(TAG, "强制重置到 NOT_STARTED: ${currentState.status} -> NOT_STARTED")
-        // ⚠️ 关键修复：不清空 selectedProgram 和 selectedPaymentMethod，避免白屏
+        // ⚠️ 关键修复：支付成功后必须完全清理状态，允许用户再次选择套餐
+        // 清空 selectedProgram 和 selectedPaymentMethod，确保恢复到初始状态
         return PaymentFlowState(
             status = PaymentFlowStatus.NOT_STARTED,
-            selectedProgram = currentState.selectedProgram,  // ⚠️ 保留选择，避免白屏
-            selectedPaymentMethod = currentState.selectedPaymentMethod,  // ⚠️ 保留支付方式，避免白屏
+            selectedProgram = null,  // ⚠️ 清空选择，允许用户再次选择套餐
+            selectedPaymentMethod = null,  // ⚠️ 清空支付方式，恢复到初始状态
             paymentConfirmed = false,
             errorMessage = null,
             paidAmountCents = 0,

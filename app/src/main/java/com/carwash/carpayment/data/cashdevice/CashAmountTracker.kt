@@ -3,16 +3,21 @@ package com.carwash.carpayment.data.cashdevice
 import android.util.Log
 
 /**
- * 现金金额跟踪器（基于真实收款金额）
+ * 现金金额跟踪器（基于 GetAllLevels 差分）
  * 
- * ⚠️ 重要变更：不再使用 GetAllLevels / Stored（库存）推算"用户投入金额"
+ * ⚠️ 关键修复：本版本以 GetAllLevels 差分为唯一判定口径
  * 
- * 改为使用"本次交易的实际收款金额（credit / inserted / paid）"作为判断依据
+ * 金额计算方式：
+ * - 支付判定：使用 GetAllLevels 差分（Levels delta）
+ * - 设备状态：使用 deviceStates[deviceID].sessionDeltaCents 聚合
+ * - 禁止使用：GetCounters/avgVal 参与支付成功/失败判定（仅允许作为日志维护统计）
  * 
- * LEVELS 只允许用于：
+ * LEVELS 用途：
+ * - 支付判定（唯一口径）
  * - 找零库存显示
  * - 运维/诊断日志
- * 绝不能再参与 paidSessionDelta 计算
+ * 
+ * ⚠️ 历史遗留：devicePaidAmounts/deviceBaselinePaidAmounts 相关字段与方法未启用，不用于支付判定
  */
 class CashAmountTracker {
     
@@ -20,13 +25,34 @@ class CashAmountTracker {
         private const val TAG = "CashAmountTracker"
     }
     
-    // ⚠️ 核心变更：使用真实收款金额（credit/inserted/paid），不再使用库存差值
+    // ⚠️ 关键修复：并发保护 - 使用 synchronized 确保一次轮询计算是原子性的
+    private val lock = Any()
+    
+    // ⚠️ 历史遗留：以下字段未启用，不用于支付判定（本版本以 GetAllLevels 差分为唯一口径）
     // 设备已收金额（分）：deviceID -> 本次会话累计收款金额
-    // 数据来源：GetCounters API 的 stackedTotalCents
+    // 数据来源：GetCounters API 的 stackedTotalCents（已停用）
+    @Suppress("unused")
     private val devicePaidAmounts = mutableMapOf<String, Int>()  // key = deviceID, value = 已收金额（分）
     
-    // 设备基线收款金额（在支付开始时记录，用于计算会话增量）
+    // 设备基线收款金额（在支付开始时记录，用于计算会话增量）（已停用）
+    @Suppress("unused")
     private val deviceBaselinePaidAmounts = mutableMapOf<String, Int>()  // key = deviceID, value = 基线金额（分）
+    
+    // ⚠️ 关键修复：baseline 状态（按 device 维度）
+    private enum class BaselineStatus {
+        NOT_SET,  // 未设置
+        SET       // 已设置（会话过程中不得覆盖）
+    }
+    private val baselineStatus = mutableMapOf<String, BaselineStatus>()  // key = deviceID, value = 状态
+    
+    // ⚠️ 关键修复：设备状态（用于聚合汇总和对账）
+    data class DeviceState(
+        val deviceID: String,
+        val baselineLevels: Map<Int, Int>,  // Map<denomValue, storedCount>
+        val lastLevels: Map<Int, Int>,      // Map<denomValue, storedCount>
+        val sessionDeltaCents: Int          // 本次会话增量（分）
+    )
+    private val deviceStates = mutableMapOf<String, DeviceState>()  // key = deviceID
     
     // 保留库存相关字段（仅用于找零库存显示和运维日志，不参与支付判断）
     private val baselineLevels = mutableMapOf<String, Int>()  // key = "deviceID:channel", value = stored
@@ -38,23 +64,48 @@ class CashAmountTracker {
     
     /**
      * 设置设备基线库存（在支付开始时调用，基于 GetAllLevels）
-     * 这是实时收款的主要方法，用于设置baseline并开始跟踪
+     * ⚠️ 关键修复：baseline 只允许在"会话启动后第一次成功 GetAllLevels"时写入一次
      * @param deviceID 设备ID
      * @param levels 基线库存 - 从 GetAllLevels 读取，格式：Map<面额value, 库存数量stored>
      * @param dataSource 数据源标识（用于日志）："LEVELS" 或 "ASSIGNMENT"
+     * @param reason 设置原因（用于日志）："SESSION_START" 等
      */
-    fun setBaselineFromLevels(deviceID: String, levels: Map<Int, Int>, dataSource: String = "LEVELS") {
-        // 将 value -> stored 转换为 deviceID:channel -> stored
-        // 假设 channel=0（GetAllLevels 没有 channel 信息）
-        levels.forEach { (value, stored) ->
-            val key = "$deviceID:0"
+    fun setBaselineFromLevels(deviceID: String, levels: Map<Int, Int>, dataSource: String = "LEVELS", reason: String = "SESSION_START") {
+        // ⚠️ 关键修复：如果 baseline 已设置，禁止覆盖（除非会话结束/重启）
+        val currentStatus = baselineStatus[deviceID]
+        if (currentStatus == BaselineStatus.SET) {
+            Log.w(TAG, "⚠️ baseline 已设置，禁止覆盖: deviceID=$deviceID, reason=$reason")
+            Log.w(TAG, "说明: 会话过程中 baseline 不得被覆盖，如需重置请先调用 clearBaselineForDevice")
+            return
+        }
+        
+        // ⚠️ 关键修复：baseline 的内容必须来自真实返回，禁止任何"默认给 1"/"缺省填充"逻辑
+        // 如果某些面额在 levels 里不存在，就不应出现在 baseline 里
+        val realLevels = levels.filter { (_, stored) -> stored >= 0 }  // 只保留有效的 stored 值
+        
+        // ⚠️ 关键修复：key 必须包含面额 value（因为 GetAllLevels 没有 channel）
+        // 使用 "$deviceID:$value" 而不是 "$deviceID:0"，避免所有面额覆盖同一个 key
+        realLevels.forEach { (value, stored) ->
+            val key = "$deviceID:$value"
             baselineLevels[key] = stored
             currentLevels[key] = stored
             previousLevels[key] = stored
             valueMap[key] = value
         }
-        val baselineTotal = calculateTotalFromLevels(levels)
-        Log.d(TAG, "设置设备基线库存（基于$dataSource）: deviceID=$deviceID, 条目数=${levels.size}, baselineTotalCents=$baselineTotal (${baselineTotal / 100.0}元)")
+        
+        // ⚠️ 关键修复：更新设备状态
+        val baselineTotal = calculateTotalFromLevels(realLevels)
+        deviceStates[deviceID] = DeviceState(
+            deviceID = deviceID,
+            baselineLevels = realLevels,
+            lastLevels = realLevels,
+            sessionDeltaCents = 0
+        )
+        
+        // ⚠️ 关键修复：标记 baseline 为已设置
+        baselineStatus[deviceID] = BaselineStatus.SET
+        
+        Log.d(TAG, "设置设备基线库存（基于$dataSource）: deviceID=$deviceID, 条目数=${realLevels.size}, baselineTotalCents=$baselineTotal (${baselineTotal / 100.0}元), reason=$reason")
     }
     
     /**
@@ -70,6 +121,7 @@ class CashAmountTracker {
     
     /**
      * 从货币分配设置设备基线库存（基于 GetCurrencyAssignment 的 stored + storedInCashbox）
+     * ⚠️ 关键修复：baseline 只允许在"会话启动后第一次成功 GetAllLevels"时写入一次
      * 
      * 金额统计口径修复：
      * - 设备总库存金额：sum((Stored + StoredInCashbox) * Value)
@@ -83,27 +135,63 @@ class CashAmountTracker {
      * 
      * @param deviceID 设备ID
      * @param assignments 货币分配列表
+     * @param reason 设置原因（用于日志）："SESSION_START" 等
      */
-    fun setBaselineFromAssignments(deviceID: String, assignments: List<com.carwash.carpayment.data.cashdevice.CurrencyAssignment>) {
-        // 保存货币分配快照
-        assignmentSnapshots[deviceID] = assignments.toList()
-        
+    fun setBaselineFromAssignments(deviceID: String, assignments: List<com.carwash.carpayment.data.cashdevice.CurrencyAssignment>, reason: String = "SESSION_START") {
+        // ⚠️ 关键修复：如果 baseline 已设置，禁止覆盖（除非会话结束/重启）
+        val currentStatus = baselineStatus[deviceID]
+        if (currentStatus == BaselineStatus.SET) {
+            Log.w(TAG, "⚠️ baseline 已设置，禁止覆盖: deviceID=$deviceID, reason=$reason")
+            Log.w(TAG, "说明: 会话过程中 baseline 不得被覆盖，如需重置请先调用 clearBaselineForDevice")
+            return
+        }
+        // ⚠️ 关键修复：baseline 的内容必须来自真实返回，禁止任何"默认给 1"/"缺省填充"逻辑
         // 构建基线库存：key = "deviceID:channel", value = stored + storedInCashbox（总库存）
         // 注意：快照 key 使用 deviceId + ":" + channel（因为同 value 不同 channel 也可能存在）
+        val realBaselineLevels = mutableMapOf<String, Int>()
         assignments.forEach { assignment ->
             val channel = assignment.channel ?: 0
             val key = "$deviceID:$channel"
             // 总库存 = Stored（recycler） + StoredInCashbox（cashbox）
             val totalStored = assignment.stored + assignment.storedInCashbox
             val value = assignment.value
+            // ⚠️ 关键修复：只保存有效的 stored 值（>= 0），禁止填充默认值
+            if (totalStored >= 0) {
             baselineLevels[key] = totalStored
             currentLevels[key] = totalStored  // 初始时当前库存等于基线
             previousLevels[key] = totalStored  // 初始时上一次库存等于基线
             valueMap[key] = value  // 保存面额映射（用于金额计算）
+                realBaselineLevels[key] = totalStored
+            }
+        }
+        
+        // 保存货币分配快照
+        assignmentSnapshots[deviceID] = assignments.toList()
+        
+        // ⚠️ 关键修复：转换为 Map<denomValue, storedCount> 格式用于 DeviceState
+        val baselineLevelsMap = mutableMapOf<Int, Int>()
+        assignments.forEach { assignment ->
+            val totalStored = assignment.stored + assignment.storedInCashbox
+            if (totalStored >= 0) {
+                val value = assignment.value
+                baselineLevelsMap[value] = (baselineLevelsMap[value] ?: 0) + totalStored
+            }
         }
         
         val baselineTotal = calculateTotalFromAssignments(assignments)
-        Log.d(TAG, "从货币分配设置设备基线库存: deviceID=$deviceID, 面额数=${assignments.size}, baselineTotalCents=$baselineTotal (${baselineTotal / 100.0}元)")
+        
+        // ⚠️ 关键修复：更新设备状态
+        deviceStates[deviceID] = DeviceState(
+            deviceID = deviceID,
+            baselineLevels = baselineLevelsMap,
+            lastLevels = baselineLevelsMap,
+            sessionDeltaCents = 0
+        )
+        
+        // ⚠️ 关键修复：标记 baseline 为已设置
+        baselineStatus[deviceID] = BaselineStatus.SET
+        
+        Log.d(TAG, "从货币分配设置设备基线库存: deviceID=$deviceID, 面额数=${assignments.size}, baselineTotalCents=$baselineTotal (${baselineTotal / 100.0}元), reason=$reason")
     }
     
     /**
@@ -130,7 +218,21 @@ class CashAmountTracker {
      * @param assignments 货币分配列表
      * @return 本次会话累计金额（分）- sessionDeltaCents
      */
-    fun updateFromAssignments(deviceID: String, assignments: List<com.carwash.carpayment.data.cashdevice.CurrencyAssignment>): Int {
+    fun updateFromAssignments(deviceID: String, assignments: List<com.carwash.carpayment.data.cashdevice.CurrencyAssignment>, sessionActive: Boolean = true, attemptId: String = ""): Int = synchronized(lock) {
+        // ⚠️ 关键修复：sessionActive 防护 - sessionActive=false 时，不再触发更新
+        if (!sessionActive) {
+            Log.d(TAG, "⚠️ 会话已结束，跳过更新: deviceID=$deviceID, attemptId=$attemptId")
+            return 0
+        }
+        
+        // ⚠️ 关键修复：确保设备已注册（如果 baseline 未设置，说明设备未注册）
+        val deviceState = deviceStates[deviceID]
+        if (deviceState == null) {
+            Log.w(TAG, "⚠️ 设备未注册，无法更新: deviceID=$deviceID, attemptId=$attemptId")
+            Log.w(TAG, "说明: 请先调用 setBaselineFromAssignments 注册设备")
+            return 0
+        }
+        
         // 保存货币分配快照
         assignmentSnapshots[deviceID] = assignments.toList()
         
@@ -153,32 +255,84 @@ class CashAmountTracker {
             valueMap[key] = value  // 保存面额映射（用于金额计算）
         }
         
+        // ⚠️ 关键修复：转换为 Map<denomValue, storedCount> 格式用于 DeviceState
+        val currentLevelsMap = mutableMapOf<Int, Int>()
+        assignments.forEach { assignment ->
+            val totalStored = assignment.stored + assignment.storedInCashbox
+            if (totalStored >= 0) {
+                val value = assignment.value
+                currentLevelsMap[value] = (currentLevelsMap[value] ?: 0) + totalStored
+            }
+        }
+        
         // 计算会话差值：sessionDeltaCents = Σ(value * (totalStored_now - totalStored_baseline))
-        // 其中 totalStored = stored + storedInCashbox
+        // ⚠️ 关键修复：使用 deviceState.baselineLevels 作为基准（确保一致性）
         var sessionDeltaCents = 0
+        var baselineTotalCents = 0
+        var currentTotalCents = 0
+        
+        // ⚠️ 关键修复：使用可变副本以便自愈
+        val baselineLevelsMap = deviceState.baselineLevels.toMutableMap()
+        
         assignments.forEach { assignment ->
             val channel = assignment.channel ?: 0
             val key = "$deviceID:$channel"
-            val baselineTotalStored = baselineLevels[key] ?: 0
-            val currentTotalStored = assignment.stored + assignment.storedInCashbox
-            val totalStoredDelta = currentTotalStored - baselineTotalStored
+            // ⚠️ 关键修复：优先使用 deviceState.baselineLevels，fallback 到 currentTotalStored（自愈）
             val value = assignment.value
+            val currentTotalStored = assignment.stored + assignment.storedInCashbox
+            // ⚠️ 关键修复：baselineStored 默认值必须是 0 或 currentStored（推荐 currentStored），绝不能是 1
+            // 如果 baselineMap 缺某面额：baselineStored = currentStored（最稳）
+            val baselineStored = baselineLevelsMap[value] ?: currentTotalStored
+            val totalStoredDelta = currentTotalStored - baselineStored
+            
+            baselineTotalCents += value * baselineStored
+            currentTotalCents += value * currentTotalStored
+            
+            if (totalStoredDelta > 0) {
             sessionDeltaCents += value * totalStoredDelta
+            } else if (totalStoredDelta < 0) {
+                // ⚠️ 关键修复：库存回退自愈 - 重建该面额的 baseline
+                Log.w(TAG, "检测到库存回退: deviceID=$deviceID, value=${value}分, baselineStored=$baselineStored, currentStored=$currentTotalStored, delta=$totalStoredDelta")
+                Log.w(TAG, "⚠️ 执行自愈：重建 baseline，baselineStored=$baselineStored -> currentStored=$currentTotalStored")
+                
+                // 立刻对该面额进行自愈：baselineStored = currentTotalStored（写回 baselineMap）
+                baselineLevelsMap[value] = currentTotalStored
+                // 同时更新 baselineLevels（用于兼容旧代码）
+                baselineLevels[key] = currentTotalStored
+                
+                // 将该面额贡献的 delta 视为 0（不要让 sessionDeltaCents/paidDelta 变负）
+                // totalStoredDelta 已经是负数，不累加到 sessionDeltaCents 即可
+                Log.d(TAG, "自愈完成: value=${value}分, 新baselineStored=$currentTotalStored, delta贡献=0")
+            }
         }
         
         // 确保不会出现负数
         sessionDeltaCents = maxOf(0, sessionDeltaCents)
         
-        val currentTotalCents = calculateTotalFromAssignments(assignments)
-        val baselineTotalCents = baselineLevels.entries
-            .filter { it.key.startsWith("$deviceID:") }
-            .sumOf { (key, stored) -> (valueMap[key] ?: 0) * stored }
+        // ⚠️ 关键修复：只写一次 deviceStates，使用 newState 变量，避免重复覆盖
+        val newState = deviceState.copy(
+            baselineLevels = baselineLevelsMap,
+            lastLevels = currentLevelsMap,
+            sessionDeltaCents = sessionDeltaCents
+        )
+        deviceStates[deviceID] = newState
         
-        // 详细日志（每次金额轮询）
-        Log.d(TAG, "金额轮询（从货币分配）: deviceID=$deviceID, baselineTotalCents=$baselineTotalCents, currentTotalCents=$currentTotalCents, sessionDeltaCents=$sessionDeltaCents, 面额数=${assignments.size}")
-        
+        // ⚠️ 关键修复：统一日志口径（确保可对账）
+        val deltaCents = currentTotalCents - baselineTotalCents
+        val deviceCount = deviceStates.size
+        val baselineMapSize = newState.baselineLevels.size  // ⚠️ 使用 newState 而不是旧的 deviceState
         val totalCents = getTotalCents()
-        Log.d(TAG, "总金额: ${totalCents}分 (${totalCents / 100.0}元), 设备数量=${assignmentSnapshots.size}")
+        val threadName = Thread.currentThread().name
+        
+        Log.d(TAG, "金额轮询（从货币分配）: deviceID=$deviceID, attemptId=$attemptId, sessionActive=$sessionActive, thread=$threadName")
+        Log.d(TAG, "  baselineTotalCents=$baselineTotalCents, currentTotalCents=$currentTotalCents, deltaCents=$deltaCents, sessionDeltaCents=$sessionDeltaCents")
+        Log.d(TAG, "  deviceMap.size=$deviceCount, baselineMap.size=$baselineMapSize, 面额数=${assignments.size}")
+        Log.d(TAG, "总金额: ${totalCents}分 (${totalCents / 100.0}元), 设备数量=$deviceCount")
+        
+        // ⚠️ 关键修复：验证对账一致性
+        if (deltaCents != sessionDeltaCents) {
+            Log.w(TAG, "⚠️ 对账不一致: deltaCents=$deltaCents vs sessionDeltaCents=$sessionDeltaCents")
+        }
         
         return sessionDeltaCents
     }
@@ -194,22 +348,41 @@ class CashAmountTracker {
     
     /**
      * 更新设备当前库存（轮询时调用，基于 GetAllLevels）
-     * 这是实时收款的主要方法，用于更新current并计算sessionDelta
+     * ⚠️ 关键修复：更新 deviceStates，确保聚合汇总可对账
+     * ⚠️ 关键修复：使用 synchronized 保护，确保一次轮询计算是原子性的
      * @param deviceID 设备ID
      * @param levels 当前库存 - 从 GetAllLevels 获取，格式：Map<面额value, 库存数量stored>
      * @param dataSource 数据源标识（用于日志）："LEVELS" 或 "ASSIGNMENT"
+     * @param sessionActive 会话是否活跃（用于并发保护）
+     * @param attemptId 轮询尝试ID（用于日志）
      * @return 本次会话累计金额（分）- sessionDeltaCents
      */
-    fun updateFromLevels(deviceID: String, levels: Map<Int, Int>, dataSource: String = "LEVELS"): Int {
-        // 保存上一次库存（用于计算变化明细）
+    fun updateFromLevels(deviceID: String, levels: Map<Int, Int>, dataSource: String = "LEVELS", sessionActive: Boolean = true, attemptId: String = ""): Int = synchronized(lock) {
+        // ⚠️ 关键修复：sessionActive 防护 - sessionActive=false 时，不再触发更新
+        if (!sessionActive) {
+            Log.d(TAG, "⚠️ 会话已结束，跳过更新: deviceID=$deviceID, attemptId=$attemptId")
+            return 0
+        }
+        
+        // ⚠️ 关键修复：确保设备已注册（如果 baseline 未设置，说明设备未注册）
+        val deviceState = deviceStates[deviceID]
+        if (deviceState == null) {
+            Log.w(TAG, "⚠️ 设备未注册，无法更新: deviceID=$deviceID, attemptId=$attemptId")
+            Log.w(TAG, "说明: 请先调用 setBaselineFromLevels 注册设备")
+            return 0
+        }
+        
+        // ⚠️ 关键修复：保存上一次库存（用于计算变化明细）
+        // key 必须包含面额 value，使用 "$deviceID:$value" 而不是 "$deviceID:0"
         levels.keys.forEach { value ->
-            val key = "$deviceID:0"
+            val key = "$deviceID:$value"
             previousLevels[key] = currentLevels[key] ?: 0
         }
         
-        // 更新当前库存和面额映射
+        // ⚠️ 关键修复：更新当前库存和面额映射
+        // key 必须包含面额 value，使用 "$deviceID:$value" 而不是 "$deviceID:0"
         levels.forEach { (value, stored) ->
-            val key = "$deviceID:0"
+            val key = "$deviceID:$value"
             currentLevels[key] = stored
             valueMap[key] = value
         }
@@ -219,9 +392,13 @@ class CashAmountTracker {
         var billBaselineTotal = 0
         var billCurrentTotal = 0
         
+        // ⚠️ 关键修复：使用 deviceState.baselineLevels 作为基准（确保一致性）
+        val baselineLevelsMap = deviceState.baselineLevels.toMutableMap()  // 使用可变副本以便自愈
+        
         levels.forEach { (value, currentStored) ->
-            val key = "$deviceID:0"
-            val baselineStored = baselineLevels[key] ?: 0
+            // ⚠️ 关键修复：baselineStored 默认值必须是 0 或 currentStored（推荐 currentStored），绝不能是 1
+            // 如果 baselineMap 缺某面额：baselineStored = currentStored（最稳）
+            val baselineStored = baselineLevelsMap[value] ?: currentStored
             val storedDelta = currentStored - baselineStored
             
             billBaselineTotal += value * baselineStored
@@ -230,19 +407,48 @@ class CashAmountTracker {
             if (storedDelta > 0) {
                 sessionDeltaCents += value * storedDelta
             } else if (storedDelta < 0) {
-                // 允许出现硬件复位/吐币导致回退，但要打日志
+                // ⚠️ 关键修复：库存回退自愈 - 重建该面额的 baseline
                 Log.w(TAG, "检测到库存回退: deviceID=$deviceID, value=${value}分, baselineStored=$baselineStored, currentStored=$currentStored, delta=$storedDelta")
+                Log.w(TAG, "⚠️ 执行自愈：重建 baseline，baselineStored=$baselineStored -> currentStored=$currentStored")
+                
+                // 立刻对该面额进行自愈：baselineStored = currentStored（写回 baselineMap）
+                baselineLevelsMap[value] = currentStored
+                // ⚠️ 关键修复：同时更新 baselineLevels（用于兼容旧代码），key 必须包含 value
+                val key = "$deviceID:$value"
+                baselineLevels[key] = currentStored
+                
+                // 将该面额贡献的 delta 视为 0（不要让 sessionDeltaCents/paidDelta 变负）
+                // storedDelta 已经是负数，不累加到 sessionDeltaCents 即可
+                Log.d(TAG, "自愈完成: value=${value}分, 新baselineStored=$currentStored, delta贡献=0")
             }
         }
         
         sessionDeltaCents = maxOf(0, sessionDeltaCents)
         
-        // 详细日志（每次金额轮询）
-        val billDelta = billCurrentTotal - billBaselineTotal
-        Log.d(TAG, "金额轮询（基于$dataSource）: deviceID=$deviceID, baselineTotalCents=$billBaselineTotal, currentTotalCents=$billCurrentTotal, sessionDeltaCents=$sessionDeltaCents, levels条目数=${levels.size}")
+        // ⚠️ 关键修复：只写一次 deviceStates，使用 newState 变量，避免重复覆盖
+        val newState = deviceState.copy(
+            baselineLevels = baselineLevelsMap,
+            lastLevels = levels,
+            sessionDeltaCents = sessionDeltaCents
+        )
+        deviceStates[deviceID] = newState
         
+        // ⚠️ 关键修复：统一日志口径（确保可对账）
+        val billDelta = billCurrentTotal - billBaselineTotal
+        val deviceCount = deviceStates.size
+        val baselineMapSize = newState.baselineLevels.size  // ⚠️ 使用 newState 而不是旧的 deviceState
         val totalCents = getTotalCents()
-        Log.d(TAG, "总金额: ${totalCents}分 (${totalCents / 100.0}元), 设备数量=${assignmentSnapshots.size}")
+        val threadName = Thread.currentThread().name
+        
+        Log.d(TAG, "金额轮询（基于$dataSource）: deviceID=$deviceID, attemptId=$attemptId, sessionActive=$sessionActive, thread=$threadName")
+        Log.d(TAG, "  baselineTotalCents=$billBaselineTotal, currentTotalCents=$billCurrentTotal, deltaCents=$billDelta, sessionDeltaCents=$sessionDeltaCents")
+        Log.d(TAG, "  deviceMap.size=$deviceCount, baselineMap.size=$baselineMapSize, levels条目数=${levels.size}")
+        Log.d(TAG, "总金额: ${totalCents}分 (${totalCents / 100.0}元), 设备数量=$deviceCount")
+        
+        // ⚠️ 关键修复：验证对账一致性
+        if (billDelta != sessionDeltaCents) {
+            Log.w(TAG, "⚠️ 对账不一致: billDelta=$billDelta vs sessionDeltaCents=$sessionDeltaCents")
+        }
         
         return sessionDeltaCents
     }
@@ -381,30 +587,43 @@ class CashAmountTracker {
     
     /**
      * 获取指定设备的本次会话累计收款金额（分）
-     * sessionDelta = currentPaidAmount - baselinePaidAmount
+     * ⚠️ 关键修复：使用 deviceStates 而不是 devicePaidAmounts（本版本以 GetAllLevels 差分为唯一口径）
      * @param deviceID 设备ID
      * @return 本次会话累计收款金额（分）
      */
     fun getDeviceSessionCents(deviceID: String): Int {
-        val currentPaid = devicePaidAmounts[deviceID] ?: 0
-        val baselinePaid = deviceBaselinePaidAmounts[deviceID] ?: 0
-        val sessionDelta = maxOf(0, currentPaid - baselinePaid)
-        return sessionDelta
+        // ⚠️ 关键修复：使用 deviceStates 而不是 devicePaidAmounts
+        val deviceState = deviceStates[deviceID]
+        return deviceState?.sessionDeltaCents ?: 0
     }
     
     /**
      * 获取总金额（分）- 所有设备的本次会话累计收款金额总和
-     * ⚠️ 核心变更：不再使用库存差值，改用真实收款金额
+     * ⚠️ 关键修复：使用 deviceStates 聚合，确保汇总值与单设备值一致
+     * ⚠️ 关键修复：使用 synchronized 保护读取
      */
-    fun getTotalCents(): Int {
-        // 计算所有设备的会话收款金额：Σ(currentPaidAmount - baselinePaidAmount)
+    fun getTotalCents(): Int = synchronized(lock) {
+        // ⚠️ 关键修复：从 deviceStates 聚合所有设备的 sessionDeltaCents（本版本以 GetAllLevels 差分为唯一口径）
         var totalCents = 0
-        devicePaidAmounts.forEach { (deviceID, currentPaid) ->
-            val baselinePaid = deviceBaselinePaidAmounts[deviceID] ?: 0
-            val sessionDelta = maxOf(0, currentPaid - baselinePaid)
-            totalCents += sessionDelta
+        deviceStates.forEach { (deviceID, state) ->
+            totalCents += state.sessionDeltaCents
         }
+        
         return totalCents
+    }
+    
+    /**
+     * 获取设备数量（用于日志和验证）
+     */
+    fun getDeviceCount(): Int = synchronized(lock) {
+        return deviceStates.size
+    }
+    
+    /**
+     * 获取设备状态快照（用于日志和调试）
+     */
+    fun getDeviceStatesSnapshot(): Map<String, DeviceState> = synchronized(lock) {
+        return deviceStates.toMap()
     }
     
     /**
@@ -463,27 +682,51 @@ class CashAmountTracker {
     }
     
     /**
+     * 清除指定设备的 baseline（会话结束时调用）
+     * ⚠️ 关键修复：会话结束必须清理 baseline
+     */
+    fun clearBaselineForDevice(deviceID: String) {
+        Log.d(TAG, "清除设备 baseline: deviceID=$deviceID")
+        baselineStatus[deviceID] = BaselineStatus.NOT_SET
+        deviceStates.remove(deviceID)
+        // 清除库存相关字段
+        baselineLevels.keys.removeAll { it.startsWith("$deviceID:") }
+        currentLevels.keys.removeAll { it.startsWith("$deviceID:") }
+        previousLevels.keys.removeAll { it.startsWith("$deviceID:") }
+        valueMap.keys.removeAll { it.startsWith("$deviceID:") }
+        assignmentSnapshots.remove(deviceID)
+    }
+    
+    /**
      * 重置所有金额（用于新的支付会话）
+     * ⚠️ 关键修复：不清除 baseline，只清除当前状态
+     * ⚠️ 关键修复：使用 synchronized 保护，避免与轮询并发
      * 注意：不清除基线收款金额，基线只在断开连接时清除
      * 重新采集基线时，会覆盖旧的基线
      */
-    fun reset() {
+    fun reset() = synchronized(lock) {
         Log.d(TAG, "重置金额跟踪器（清除当前收款金额，保留基线）")
+        // ⚠️ 历史遗留：devicePaidAmounts 已停用，不清除也不影响
         devicePaidAmounts.clear()
+        // ⚠️ 关键修复：重置 deviceStates 的 sessionDeltaCents，但保留 baselineLevels
+        deviceStates.forEach { (deviceID, state) ->
+            deviceStates[deviceID] = state.copy(
+                lastLevels = state.baselineLevels,
+                sessionDeltaCents = 0
+            )
+        }
         // 保留库存相关字段（用于找零库存显示）
         currentLevels.clear()
     }
     
     /**
      * 移除指定设备（断开连接时调用）
-     * 清除基线收款金额和当前收款金额
+     * ⚠️ 关键修复：清除所有相关状态
      */
     fun removeDevice(deviceID: String) {
         Log.d(TAG, "移除设备: deviceID=$deviceID")
+        clearBaselineForDevice(deviceID)
         deviceBaselinePaidAmounts.remove(deviceID)
         devicePaidAmounts.remove(deviceID)
-        // 保留库存相关字段（用于找零库存显示）
-        baselineLevels.remove(deviceID)
-        currentLevels.remove(deviceID)
     }
 }

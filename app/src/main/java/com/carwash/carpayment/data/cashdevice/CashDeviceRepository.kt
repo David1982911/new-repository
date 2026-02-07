@@ -17,6 +17,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import retrofit2.Response
 
+
 //Log.d("BUILD_MARK", "CURSOR_AGENT_EXECUTED_20260128")
 
 /**
@@ -46,6 +47,10 @@ class CashDeviceRepository(
     // ⚠️ 会话活跃状态：防止在 active 会话期间 reset tracker
     @Volatile
     private var sessionActive = false  // 是否正在活跃收款会话中
+    
+    // ⚠️ 关键修复：现金会话硬闸门（防止打印后重新启动会话）
+    @Volatile
+    private var cashSessionAllowed: Boolean = false
     
     // ⚠️ 关键修复：每个设备的串行锁，保证同一时刻只有一个 dispense 在跑
     private val deviceDispenseMutexes = mutableMapOf<String, Mutex>()
@@ -301,12 +306,14 @@ class CashDeviceRepository(
         val billInhibit = filterValuesForDevice(billDeviceID ?: "", inhibitConfig.inhibitValues.toSet())
         val coinInhibit = filterValuesForDevice(coinDeviceID ?: "", inhibitConfig.inhibitValues.toSet())
         
-        // ⚠️ 关键日志：打印汇总信息
+        // ⚠️ 关键日志：打印汇总信息（必须分开纸币/硬币面额）
         Log.d(TAG, "========== 面额配置汇总 ==========")
         Log.d(TAG, "billSupportedValues=$billSupported")
         Log.d(TAG, "coinSupportedValues=$coinSupported")
-        Log.d(TAG, "billWillConfigureValues: recycler=$billRecycler, inhibit=$billInhibit")
-        Log.d(TAG, "coinWillConfigureValues: recycler=$coinRecycler, inhibit=$coinInhibit")
+        Log.d(TAG, "billRecyclerValues=$billRecycler (纸币器可找零面额)")
+        Log.d(TAG, "coinRecyclerValues=$coinRecycler (硬币器可找零面额)")
+        Log.d(TAG, "billInhibitValues=$billInhibit (纸币器禁用面额)")
+        Log.d(TAG, "coinInhibitValues=$coinInhibit (硬币器禁用面额)")
         
         // 打印跳过的面额（desiredValues - supportedValues）
         val billSkippedRecycler = routeConfig.recyclerValues - billSupported
@@ -321,18 +328,20 @@ class CashDeviceRepository(
         
         var allSuccess = true
         
-        // 3. 配置纸币器 routes
+        // 3. 配置纸币器 routes（⚠️ 关键修复：只传入纸币器面额，不混用）
         if (billDeviceID != null && billRecycler.isNotEmpty()) {
-            val success = configureRoutesForDevice(billDeviceID, billRecycler, routeConfig.recyclerValues.toSet())
+            // ⚠️ 关键修复：只传入 billRecycler.toSet()，不传入混合的 routeConfig.recyclerValues
+            val success = configureRoutesForDevice(billDeviceID, billRecycler, billRecycler.toSet())
             if (!success) {
                 Log.w(TAG, "纸币器 routes 配置失败（不阻塞收款）")
                 allSuccess = false
             }
         }
         
-        // 4. 配置硬币器 routes
+        // 4. 配置硬币器 routes（⚠️ 关键修复：只传入硬币器面额，不混用）
         if (coinDeviceID != null && coinRecycler.isNotEmpty()) {
-            val success = configureRoutesForDevice(coinDeviceID, coinRecycler, routeConfig.recyclerValues.toSet())
+            // ⚠️ 关键修复：只传入 coinRecycler.toSet()，不传入混合的 routeConfig.recyclerValues
+            val success = configureRoutesForDevice(coinDeviceID, coinRecycler, coinRecycler.toSet())
             if (!success) {
                 Log.w(TAG, "硬币器 routes 配置失败（不阻塞收款）")
                 allSuccess = false
@@ -618,6 +627,9 @@ class CashDeviceRepository(
         Log.d(TAG, "退款金额: $refundAmountCents 分 (${refundAmountCents / 100.0}€)")
         Log.d(TAG, "billDeviceID=$billDeviceID, coinDeviceID=$coinDeviceID")
         
+        // ⚠️ 关键日志：打印退款方案计算结果
+        Log.d("REFUND_MARK", "REFUND_MARK PLAN_START amount=$refundAmountCents")
+        
         // ⚠️ Step 1: 退款前置：必须先禁用接收器（纸币器与硬币器都要）
         Log.d(TAG, "退款前置：禁用接收器...")
         billDeviceID?.let { deviceID ->
@@ -674,7 +686,11 @@ class CashDeviceRepository(
                                     Log.d(TAG, "amountEUR=$dispenseEUR")
                                     Log.d(TAG, "说明：DispenseValue.Value 为 cents（分），${dispenseCents}分 = ${dispenseEUR}€")
                                     Log.d(TAG, "========================================================")
+                                    // ⚠️ 关键日志：打印即将调用的 Dispense 列表
+                                    Log.d("REFUND_MARK", "REFUND_MARK DISPENSE_CALL device=$deviceID amount=$dispenseCents denomination=$value count=$dispenseCount")
                                     val success = dispenseValue(deviceID, dispenseCents, "EUR")
+                                    // ⚠️ 关键日志：打印每次 Dispense 返回
+                                    Log.d("REFUND_MARK", "REFUND_MARK DISPENSE_RESULT device=$deviceID amount=$dispenseCents success=$success")
                                     if (success) {
                                         billDispensed += dispenseCents
                                         remainingCents -= dispenseCents
@@ -726,7 +742,11 @@ class CashDeviceRepository(
                                     Log.d(TAG, "   现场验证：Value=100→1€，Value=200→2€")
                                     Log.d(TAG, "   本次调用：Value=${dispenseCents}分 = ${dispenseEUR}€")
                                     Log.d(TAG, "========================================================")
+                                    // ⚠️ 关键日志：打印即将调用的 Dispense 列表
+                                    Log.d("REFUND_MARK", "REFUND_MARK DISPENSE_CALL device=$deviceID amount=$dispenseCents denomination=$value count=$dispenseCount")
                                     val success = dispenseValue(deviceID, dispenseCents, "EUR")
+                                    // ⚠️ 关键日志：打印每次 Dispense 返回
+                                    Log.d("REFUND_MARK", "REFUND_MARK DISPENSE_RESULT device=$deviceID amount=$dispenseCents success=$success")
                                     if (success) {
                                         coinDispensed += dispenseCents
                                         remainingCents -= dispenseCents
@@ -760,6 +780,13 @@ class CashDeviceRepository(
         val totalDispensed = coinDispensed + billDispensed
         val success = remainingCents == 0
         
+        // ⚠️ 关键修复：不得在未执行 DispenseValue 的情况下汇总为 0
+        // 如果 totalDispensed == 0 但 refundAmountCents > 0，说明没有执行任何 DispenseValue，这是异常情况
+        if (totalDispensed == 0 && refundAmountCents > 0) {
+            Log.e(TAG, "⚠️ 严重错误：退款金额 > 0 但未执行任何 DispenseValue，totalDispensed=0")
+            Log.e("REFUND_MARK", "REFUND_MARK ERROR no_dispense_called amount=$refundAmountCents totalDispensed=0")
+        }
+        
         Log.d(TAG, "========== 退款完成 ==========")
         Log.d(TAG, "退款金额: $refundAmountCents 分")
         Log.d(TAG, "纸币器找零（优先）: $billDispensed 分")
@@ -778,6 +805,8 @@ class CashDeviceRepository(
         }
         
         // ⚠️ Step D: 添加 REFUND_MARK 日志
+        // ⚠️ 关键日志：打印最终 remaining
+        Log.d("REFUND_MARK", "REFUND_MARK FINAL_RESULT success=$success remaining=$remainingCents totalDispensed=$totalDispensed billDispensed=$billDispensed coinDispensed=$coinDispensed")
         if (success) {
             Log.d("REFUND_MARK", "RESULT success=true remaining=0")
             Log.d("REFUND_MARK", "已收款=${refundAmountCents}分，已退款=${totalDispensed}分，remaining=0")
@@ -963,28 +992,16 @@ class CashDeviceRepository(
                 Log.d(TAG, "OPEN OK Port=$port SspAddress=$sspAddress -> deviceModel=${response.DeviceModel} deviceId=${response.deviceID} (耗时${duration}ms)")
                 Log.d(TAG, "设备ID获取成功: OpenConnection响应返回的deviceID=${response.deviceID}")
                 
-                // 探测成功后立即断开连接，避免影响后续正常连接
-                if (deviceID != null) {
-                    try {
-                        probeApi.disconnectDevice(deviceID)
-                        Log.d(TAG, "探测后已断开连接: DeviceID=$deviceID")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "探测后断开连接失败（可忽略）: DeviceID=$deviceID", e)
-                    }
-                }
+                // ⚠️ 关键修复：探测成功后保持连接，不允许在"探测后"自动 Disconnect
+                // 平时只 DisableAcceptor，支付开始才 EnableAcceptor
+                Log.d(TAG, "探测成功，保持连接: DeviceID=$deviceID（不再断开连接）")
                 
                 response
             } else {
                 Log.w(TAG, "探测失败（设备响应无效）: Port=$port, SspAddress=$sspAddress, DeviceModel=${response.DeviceModel ?: "null"}, DeviceID=${response.deviceID ?: "null"} (耗时${duration}ms)")
                 
-                // 即使失败也尝试断开连接
-                if (deviceID != null) {
-                    try {
-                        probeApi.disconnectDevice(deviceID)
-                    } catch (e: Exception) {
-                        // 忽略断开失败
-                    }
-                }
+                // ⚠️ 关键修复：探测失败时也不断开连接（保持连接状态，避免影响后续正常连接）
+                // 注意：探测失败时 deviceID 可能为 null，不需要断开
                 
                 null
             }
@@ -1539,11 +1556,18 @@ class CashDeviceRepository(
     /**
      * 启用接收器
      * 注意：服务器返回 text/plain 纯文本（如 "Message: Acceptor enabled successfully."），response.isSuccessful 即认为成功
+     * @param deviceID 设备ID
+     * @param caller 调用者标识（用于日志追踪）
      */
-    suspend fun enableAcceptor(deviceID: String): Boolean {
+    suspend fun enableAcceptor(deviceID: String, caller: String = "unknown"): Boolean {
         return try {
+            // ⚠️ 关键修复：状态断言日志（用于定位谁触发了启用收款）
+            val stackTrace = Thread.currentThread().stackTrace.take(5).joinToString("\n") { it.toString() }
+            Log.d("CASH_GUARD", "CASH_GUARD enableAcceptor called: deviceID=$deviceID, caller=$caller")
+            Log.d("CASH_GUARD", "CASH_GUARD stacktrace:\n$stackTrace")
+            
             Log.d(TAG, "========== POST /EnableAcceptor 请求开始 ==========")
-            Log.d(TAG, "deviceID=$deviceID")
+            Log.d(TAG, "deviceID=$deviceID, caller=$caller")
             Log.d(TAG, "endpoint=/CashDevice/EnableAcceptor?deviceID=$deviceID")
             
             val response = api.enableAcceptor(deviceID)
@@ -1612,9 +1636,18 @@ class CashDeviceRepository(
      * 设置自动接受
      * 注意：服务器返回 text/plain 纯文本（如 "Message: Auto-accept set to True"），response.isSuccessful 即认为成功
      */
-    suspend fun setAutoAccept(deviceID: String, autoAccept: Boolean = true): Boolean {
+    suspend fun setAutoAccept(deviceID: String, autoAccept: Boolean = true, caller: String = "unknown"): Boolean {
         return try {
-            Log.d(TAG, "设置自动接受: deviceID=$deviceID, autoAccept=$autoAccept")
+            // ⚠️ 关键修复：状态断言日志（用于定位谁触发了启用收款）
+            if (autoAccept) {
+                val stackTrace = Thread.currentThread().stackTrace.take(5).joinToString("\n") { it.toString() }
+                Log.d("CASH_GUARD", "CASH_GUARD setAutoAccept(true) called: deviceID=$deviceID, caller=$caller")
+                Log.d("CASH_GUARD", "CASH_GUARD stacktrace:\n$stackTrace")
+            }
+            
+            // ⚠️ 关键修复：统一 AutoAccept 设置入口，添加 ACCEPTOR_MARK 日志
+            Log.d("ACCEPTOR_MARK", "ACCEPTOR_MARK AUTO_ACCEPT_SET device=$deviceID value=$autoAccept caller=$caller")
+            Log.d(TAG, "设置自动接受: deviceID=$deviceID, autoAccept=$autoAccept, caller=$caller")
             val response = api.setAutoAccept(deviceID, autoAccept)
             val bodyText = cleanResponseBody(response.body()?.string())
             Log.d(TAG, "SetAutoAccept 响应: isSuccessful=${response.isSuccessful}, code=${response.code()}, body=$bodyText")
@@ -1629,6 +1662,80 @@ class CashDeviceRepository(
             Log.e(TAG, "设置自动接受异常: deviceID=$deviceID, autoAccept=$autoAccept", e)
             false
         }
+    }
+    
+    /**
+     * 立即禁用接收器（用于成功后立即停收）
+     * ⚠️ 关键修复：Repository 层仅保留纯业务逻辑，协程控制由 ViewModel 层管理
+     * @param deviceIDs 设备ID列表
+     * @param reason 禁用原因（用于日志）
+     * @return DisableResult 禁用结果
+     */
+    suspend fun disableAcceptorsNow(
+        deviceIDs: List<String>,
+        reason: String = "SUCCESS"
+    ): DisableResult {
+        Log.d("ACCEPTOR_MARK", "ACCEPTOR_MARK DISABLE_START devices=${deviceIDs.joinToString(",")} reason=$reason")
+        val startTime = System.currentTimeMillis()
+        
+        val results = mutableListOf<DisableResult.DeviceResult>()
+        
+        for (deviceID in deviceIDs) {
+            var deviceSuccess = false
+            var errorMessage: String? = null
+            
+            try {
+                // 1. SetAutoAccept(false)
+                val autoAcceptSuccess = setAutoAccept(deviceID, false, caller = "disableAcceptorsNow")
+                if (!autoAcceptSuccess) {
+                    Log.w(TAG, "disableAcceptorsNow: SetAutoAccept(false) 失败: deviceID=$deviceID")
+                }
+                
+                // 2. DisableAcceptor
+                val disableSuccess = disableAcceptor(deviceID)
+                deviceSuccess = disableSuccess
+                
+                if (disableSuccess) {
+                    Log.d(TAG, "disableAcceptorsNow: 设备禁用成功: deviceID=$deviceID")
+                } else {
+                    errorMessage = "DisableAcceptor 失败"
+                    Log.w(TAG, "disableAcceptorsNow: 设备禁用失败: deviceID=$deviceID")
+                }
+            } catch (e: Exception) {
+                errorMessage = "${e.javaClass.simpleName}: ${e.message}"
+                Log.e(TAG, "disableAcceptorsNow: 设备禁用异常: deviceID=$deviceID", e)
+                deviceSuccess = false
+            }
+            
+            results.add(DisableResult.DeviceResult(
+                deviceID = deviceID,
+                success = deviceSuccess,
+                errorMessage = errorMessage
+            ))
+        }
+        
+        val allSuccess = results.all { it.success }
+        val elapsed = System.currentTimeMillis() - startTime
+        Log.d("ACCEPTOR_MARK", "ACCEPTOR_MARK DISABLE_END success=$allSuccess elapsedMs=$elapsed devices=${deviceIDs.joinToString(",")}")
+        
+        return DisableResult(
+            allSuccess = allSuccess,
+            deviceResults = results
+        )
+    }
+    
+    /**
+     * 禁用结果数据类
+     */
+    data class DisableResult(
+        val allSuccess: Boolean,
+        val deviceResults: List<DeviceResult>
+    ) {
+        data class DeviceResult(
+            val deviceID: String,
+            val success: Boolean,
+            val errorMessage: String? = null
+        )
     }
     
     /**
@@ -1679,7 +1786,7 @@ class CashDeviceRepository(
             }
             
             // 2. 设置自动接受为 true
-            val autoAcceptSuccess = setAutoAccept(deviceID, true)
+            val autoAcceptSuccess = setAutoAccept(deviceID, true, caller = "beginCashSession")
             if (!autoAcceptSuccess) {
                 Log.e(TAG, "开始现金支付会话失败：设置自动接受失败, deviceID=$deviceID")
                 // 如果设置自动接受失败，尝试禁用接收器以恢复状态
@@ -1740,7 +1847,7 @@ class CashDeviceRepository(
         
         try {
             // 1. 设置自动接受为 false
-            val autoAcceptSuccess = setAutoAccept(deviceID, false)
+            val autoAcceptSuccess = setAutoAccept(deviceID, false, caller = "endCashSession")
             if (!autoAcceptSuccess) {
                 Log.w(TAG, "结束现金支付会话：设置自动接受失败（继续执行禁用接收器）, deviceID=$deviceID")
             }
@@ -2016,7 +2123,61 @@ class CashDeviceRepository(
         }
     }
     
-    suspend fun startCashSession(): Map<String, String> {
+    /**
+     * ⚠️ 关键修复：允许现金会话（进入现金支付流程时调用）
+     */
+    fun allowCashSession(caller: String) {
+        cashSessionAllowed = true
+        Log.d("CASH_GUARD", "CASH_GUARD allow: cashSessionAllowed=true, caller=$caller")
+    }
+    
+    /**
+     * ⚠️ 关键修复：禁止现金会话（支付成功/打印后/回首页时调用）
+     */
+    fun forbidCashSession(caller: String) {
+        cashSessionAllowed = false
+        Log.d("CASH_GUARD", "CASH_GUARD forbid: cashSessionAllowed=false, caller=$caller")
+    }
+    
+    suspend fun startCashSession(caller: String = "unknown"): Map<String, String> {
+        // ⚠️ 关键修复：禁止默认 unknown caller，必须传入明确标识
+        if (caller == "unknown") {
+            Log.e("CASH_GUARD", "❌ CASH_GUARD ERROR: startCashSession called with caller=unknown, must provide explicit caller")
+            val stackTrace = Thread.currentThread().stackTrace.take(10).joinToString("\n") { it.toString() }
+            Log.e("CASH_GUARD", "❌ CASH_GUARD ERROR stacktrace:\n$stackTrace")
+            // 直接返回空 Map，不触发任何 Authenticate/OpenConnection/startSession
+            return emptyMap()
+        }
+        
+        // ⚠️ 关键修复：禁止打印后/回首页后的 caller 触发会话
+        val forbiddenCallers = listOf(
+            "PRINT_AFTER_SUCCESS",
+            "HOME_READONLY_REFRESH",
+            "HOME_",
+            "POST_SUCCESS_"
+        )
+        if (forbiddenCallers.any { caller.contains(it, ignoreCase = true) }) {
+            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK: startCashSession blocked, forbidden caller=$caller")
+            val stackTrace = Thread.currentThread().stackTrace.take(10).joinToString("\n") { it.toString() }
+            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK stacktrace:\n$stackTrace")
+            // 直接返回空 Map，不触发任何 Authenticate/OpenConnection/startSession
+            return emptyMap()
+        }
+        
+        // ⚠️ 关键修复：硬闸门检查（核心修复，100% 阻止打印后重新启动会话）
+        if (!cashSessionAllowed) {
+            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK: startCashSession blocked, cashSessionAllowed=false, caller=$caller")
+            val stackTrace = Thread.currentThread().stackTrace.take(10).joinToString("\n") { it.toString() }
+            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK stacktrace:\n$stackTrace")
+            // 直接返回空 Map，不触发任何 Authenticate/OpenConnection/startSession
+            return emptyMap()
+        }
+        
+        // ⚠️ 关键修复：状态断言日志
+        Log.d("CASH_GUARD", "CASH_GUARD startCashSession called: caller=$caller")
+        val stackTrace = Thread.currentThread().stackTrace.take(5).joinToString("\n") { it.toString() }
+        Log.d("CASH_GUARD", "CASH_GUARD startCashSession stacktrace:\n$stackTrace")
+        
         // ⚠️ 互斥保护：防止重复点击/并发调用
         return startSessionMutex.withLock {
             if (isStartingSession) {
@@ -2070,7 +2231,7 @@ class CashDeviceRepository(
                     // ⚠️ 关键修复：只有在非活跃会话时才能 reset
                     if (!sessionActive) {
                         Log.d(TAG, "重置金额跟踪器（新的支付会话，非活跃状态）")
-                        amountTracker.reset()
+                    amountTracker.reset()
                     } else {
                         Log.w(TAG, "⚠️ 警告：尝试在活跃会话期间 reset tracker，已跳过（防止丢金额）")
                     }
@@ -2088,7 +2249,7 @@ class CashDeviceRepository(
                     // ⚠️ 关键修复：只有在非活跃会话时才能 reset
                     if (!sessionActive) {
                         Log.d(TAG, "重置金额跟踪器（新的支付会话，非活跃状态）")
-                        amountTracker.reset()
+                    amountTracker.reset()
                     } else {
                         Log.w(TAG, "⚠️ 警告：尝试在活跃会话期间 reset tracker，已跳过（防止丢金额）")
                     }
@@ -2142,6 +2303,9 @@ class CashDeviceRepository(
                     
                     Log.d(TAG, "现金设备会话启动成功: 已注册设备数量=${devices.size}")
                     
+                    // ⚠️ 关键日志：CASH_SESSION_MARK - 会话启动
+                    Log.d("CASH_SESSION_MARK", "CASH_SESSION_MARK START caller=$caller billDeviceID=$billDeviceID coinDeviceID=$coinDeviceID")
+                    
                     // 连接成功，保持连接状态（直到支付结束或断开连接）
                     return@withLock devices
                 } catch (e: Exception) {
@@ -2167,7 +2331,24 @@ class CashDeviceRepository(
      * ⚠️ 关键修复：打印 stopCashSession 的真实 reason，不要混用 COUNTERS_PARSE_FAILED 影响全局
      * @param reason 停止原因（必须明确，不要混用错误码）
      */
+    /**
+     * ⚠️ 关键修复：停止现金会话
+     * 
+     * 注意：
+     * - 退款/找零必须在调用 stopCashSession 之前完成（在 finishAttempt 中完成）
+     * - stopCashSession 只负责清理会话状态，不负责退款/找零
+     * - 即使 finally 进来、协程取消，也不能跳过关键动作（但退款/找零应该在 finishAttempt 中完成）
+     * - 最多跳过重复的 disable/stop polling（幂等检查）
+     */
     suspend fun stopCashSession(reason: String = "正常结束") {
+        // ⚠️ 关键修复：幂等检查 - 如果会话已非活跃，直接返回，避免重复调用
+        // 注意：这不会跳过退款/找零，因为退款/找零应该在 finishAttempt 中完成
+        if (!isSessionActive()) {
+            Log.d(TAG, "stopCashSession 幂等检查：会话已非活跃，跳过（reason=$reason）")
+            Log.d(TAG, "说明：退款/找零应在 finishAttempt 中完成，stopCashSession 只负责清理会话状态")
+            return
+        }
+        
         Log.d(TAG, "========== stopCashSession 调用 ==========")
         Log.d(TAG, "停止原因: $reason")
         Log.d(TAG, "==========================================")
@@ -2209,6 +2390,9 @@ class CashDeviceRepository(
             
             // ⚠️ 关键修复：标记会话为非活跃状态，然后才能 reset
             setSessionActive(false)
+            
+            // ⚠️ 关键日志：CASH_SESSION_MARK - 会话停止
+            Log.d("CASH_SESSION_MARK", "CASH_SESSION_MARK STOP reason=$reason billDeviceID=$billDeviceID coinDeviceID=$coinDeviceID")
             
             // 3. 重置金额跟踪器（只有在会话非活跃时才能 reset）
             amountTracker.reset()
@@ -2278,6 +2462,7 @@ class CashDeviceRepository(
     
     /**
      * 读取当前库存（获取设备各面额库存）
+     * ⚠️ 注意：此方法可能用于现金会话期间，也可能用于打印后的 read-only 操作
      * @param deviceID 设备ID
      * @return LevelsResponse 库存响应（包含各面额的 Value 和 Stored）
      */
@@ -2317,6 +2502,44 @@ class CashDeviceRepository(
         } catch (e: Exception) {
             Log.e(TAG, "读取库存异常: deviceID=$deviceID", e)
             // 返回空的库存响应（容错处理），不把金额清零
+            LevelsResponse(deviceID = deviceID, error = e.message)
+        }
+    }
+    
+    /**
+     * 读取库存（read-only，不触发任何 session lifecycle）
+     * ⚠️ 关键修复：纯读操作，用于打印后的库存刷新/审计/对账
+     * 不得调用：startCashSession/startDevice/startSession/enableAcceptor/setAutoAccept/setBaseline/reset
+     * 不得改变任何 sessionActive / isConnecting / baselineStore 等状态
+     * @param deviceID 设备ID
+     * @param caller 调用者标识（用于日志）
+     * @return LevelsResponse 库存响应（包含各面额的 Value 和 Stored）
+     */
+    suspend fun readLevelsReadOnly(deviceID: String, caller: String = "unknown"): LevelsResponse {
+        return try {
+            Log.d(TAG, "READ_ONLY_LEVELS: deviceID=$deviceID, caller=$caller")
+            val levelsResponse = api.getAllLevels(deviceID)
+            val levelsList = levelsResponse.levels ?: emptyList()
+            val levelsCount = levelsList.size
+            val totalCents = levelsResponse.calculateTotalCents()
+            
+            Log.d(TAG, "READ_ONLY_LEVELS 响应: deviceID=$deviceID, levelsCount=$levelsCount, totalCents=$totalCents (${levelsResponse.calculateTotalAmount()}元), caller=$caller")
+            
+            if (levelsCount > 0) {
+                // 打印每个面额的详细信息
+                levelsList.forEach { level ->
+                    Log.d(TAG, "  READ_ONLY 面额: Value=${level.value}分, Stored=${level.stored}, CountryCode=${level.countryCode}")
+                }
+            }
+            
+            levelsResponse
+        } catch (e: retrofit2.HttpException) {
+            val code = e.code()
+            val errorBody = e.response()?.errorBody()?.string() ?: ""
+            Log.e(TAG, "READ_ONLY_LEVELS HTTP 错误: deviceID=$deviceID, code=$code, errorBody=$errorBody, caller=$caller")
+            LevelsResponse(deviceID = deviceID, error = "HTTP $code: $errorBody")
+        } catch (e: Exception) {
+            Log.e(TAG, "READ_ONLY_LEVELS 异常: deviceID=$deviceID, caller=$caller", e)
             LevelsResponse(deviceID = deviceID, error = e.message)
         }
     }
@@ -2428,26 +2651,26 @@ class CashDeviceRepository(
         
         return deviceMutex.withLock {
             try {
-                val request = DispenseValueRequest(value = valueCents, countryCode = countryCode)
-                
-                // 构建完整 URL（用于日志）
-                val baseUrl = "http://127.0.0.1:5000/api"
-                val fullUrl = "$baseUrl/CashDevice/DispenseValue?deviceID=$deviceID"
-                
+            val request = DispenseValueRequest(value = valueCents, countryCode = countryCode)
+            
+            // 构建完整 URL（用于日志）
+            val baseUrl = "http://127.0.0.1:5000/api"
+            val fullUrl = "$baseUrl/CashDevice/DispenseValue?deviceID=$deviceID"
+            
                 // ⚠️ 关键修复：使用与 Retrofit 相同的序列化配置（encodeDefaults=true，确保 CountryCode 被序列化）
                 val jsonForLog = kotlinx.serialization.json.Json {
                     encodeDefaults = true  // ⚠️ 关键：确保所有字段都被序列化（包括 CountryCode）
-                    ignoreUnknownKeys = false
-                }
+                ignoreUnknownKeys = false
+            }
                 val requestBodyJson = jsonForLog.encodeToString(
-                    kotlinx.serialization.serializer<DispenseValueRequest>(), request
-                )
-                
+                kotlinx.serialization.serializer<DispenseValueRequest>(), request
+            )
+            
                 Log.d(TAG, "========== DispenseValue 请求开始（串行锁保护） ==========")
-                Log.d(TAG, "deviceID: $deviceID")
+            Log.d(TAG, "deviceID: $deviceID")
                 Log.d(TAG, "amountCents=$valueCents (${valueCents / 100.0}€)")
                 Log.d(TAG, "countryCode=$countryCode")
-                Log.d(TAG, "fullUrl: $fullUrl")
+            Log.d(TAG, "fullUrl: $fullUrl")
                 Log.d(TAG, "序列化后的 RequestBody（用于日志验证）: $requestBodyJson")
                 
                 // ⚠️ 硬保护：如果构造出的 body 缺 CountryCode，直接在本地抛错并拒绝发送
@@ -2471,7 +2694,7 @@ class CashDeviceRepository(
                 
                 // ⚠️ 关键修复：注意：实际发送的 body 由 Retrofit 序列化，可能因 encodeDefaults=false 而不同
                 // ⚠️ 真实发送的 body 会在 OkHttp 日志拦截器中打印（HttpLoggingInterceptor.Level.BODY）
-                Log.d(TAG, "--> POST /CashDevice/DispenseValue?deviceID=$deviceID")
+            Log.d(TAG, "--> POST /CashDevice/DispenseValue?deviceID=$deviceID")
                 Log.d(TAG, "⚠️ 注意：真实发送的 body 请查看 OkHttp 日志（HttpLoggingInterceptor），确保包含 CountryCode")
             
             // ⚠️ 关键日志：每次下发 DispenseValue 前打印金额单位信息
@@ -2672,16 +2895,16 @@ class CashDeviceRepository(
                     }
                 } else {
                     // 非 BUSY 错误，直接返回失败
-                    Log.e(TAG, "========== DispenseValue 请求失败 ==========")
+                Log.e(TAG, "========== DispenseValue 请求失败 ==========")
                     return@withLock false
                 }
                 
                 // 如果重试成功，已经 return true，这里不会执行
                 false
             }
-            } catch (e: Exception) {
+        } catch (e: Exception) {
                 Log.e(TAG, "DispenseValue 异常", e)
-                false
+            false
             }
         }
     }
@@ -2924,8 +3147,8 @@ class CashDeviceRepository(
                 // ⚠️ 修复：Smart Coin System 也支持 SetDenominationRoute fallback（厂商确认）
                 Log.w(TAG, "SetRoutes 404 -> fallback to SetDenominationRoute (纸币器/硬币器都支持)")
                 Log.w("ROUTING_CONFIG_WARN", "device=$deviceID http=404 body=$bodyText")
-                return setRoutesFallback(deviceID, routeItems)
-            } else {
+                    return setRoutesFallback(deviceID, routeItems)
+                } else {
                 // ⚠️ Step E: SetRoutes 失败不得导致现金支付失败，只打印 warning
                 Log.w("ROUTING_CONFIG_WARN", "device=$deviceID http=$httpCode body=$bodyText")
                 Log.w(TAG, "SetRoutes 失败: deviceID=$deviceID, code=$httpCode, body=$bodyText（不阻塞收款）")
@@ -3212,8 +3435,8 @@ class CashDeviceRepository(
                 val refreshedValues = deviceSupportedValues[deviceID] ?: emptySet()
                 if (refreshedValues.isEmpty()) {
                     Log.e(TAG, "SetDenominationRoute 验证失败: 无法获取设备支持面额，拒绝请求")
-                    return false
-                }
+                return false
+            }
                 if (!refreshedValues.contains(valueCents)) {
                     Log.e(TAG, "SetDenominationRoute 验证失败: 面额 $valueCents 不在 GetAllLevels 返回的面额集合中")
                     Log.e(TAG, "  设备 $deviceID GetAllLevels 返回的面额: $refreshedValues")
@@ -3290,21 +3513,21 @@ class CashDeviceRepository(
                     // ========== DTO 序列化模式（正常模式 - 固定扁平格式）==========
                     // 固定使用扁平结构：{"Value":X,"CountryCode":"EUR","Route":1}
                     try {
-                        val request = SetDenominationRouteRequestFlat(
-                            value = valueCents,
-                            countryCode = finalCurrency,
-                            route = currentRoute
-                        )
-                        val json = kotlinx.serialization.json.Json {
-                            encodeDefaults = false
-                            ignoreUnknownKeys = false
-                        }
-                        val requestBodyJson = json.encodeToString(
-                            kotlinx.serialization.serializer<SetDenominationRouteRequestFlat>(), request
-                        )
+                    val request = SetDenominationRouteRequestFlat(
+                        value = valueCents,
+                        countryCode = finalCurrency,
+                        route = currentRoute
+                    )
+                    val json = kotlinx.serialization.json.Json {
+                        encodeDefaults = false
+                        ignoreUnknownKeys = false
+                    }
+                    val requestBodyJson = json.encodeToString(
+                        kotlinx.serialization.serializer<SetDenominationRouteRequestFlat>(), request
+                    )
                         Log.d(TAG, "========== SetDenominationRoute（固定扁平格式）==========")
-                        Log.d(TAG, "requestBodyJson=$requestBodyJson (route=$currentRoute)")
-                        
+                    Log.d(TAG, "requestBodyJson=$requestBodyJson (route=$currentRoute)")
+                    
                         val response = api.setDenominationRoute(deviceID, request)
                         
                         // 检查响应
@@ -3316,13 +3539,13 @@ class CashDeviceRepository(
                             successfulRequestBodyJson = requestBodyJson
                             successfulRoute = currentRoute
                             break  // 成功，跳出 route 循环
-                        } else {
+                    } else {
                             val httpCode = response.code()
                             val errorBodyTextSafe = errorBodyText ?: ""
                             lastError = "route=$currentRoute, http=$httpCode, errorBody=$errorBodyTextSafe"
-                            if (!probeMode) {
-                                return false
-                            }
+                        if (!probeMode) {
+                            return false
+                        }
                             // 探测模式：继续尝试下一个 route 值
                         }
                     } catch (e: Exception) {
@@ -3353,42 +3576,42 @@ class CashDeviceRepository(
                 // 使用统一日志函数打印响应（包含 errorBody，只读一次）
                 val errorBodyText = logApiResponse(TAG, "SetDenominationRoute", requestBodyJsonForLog, response)
                 
-                // ========== 成功处理 ==========
-                val responseBody = response.body()?.string() ?: ""
-                Log.d(TAG, "========== SetDenominationRoute 成功 ==========")
-                Log.d(TAG, "deviceID: $deviceID")
-                Log.d(TAG, "value: $valueCents")
-                Log.d(TAG, "currency: $finalCurrency")
+                    // ========== 成功处理 ==========
+                    val responseBody = response.body()?.string() ?: ""
+                    Log.d(TAG, "========== SetDenominationRoute 成功 ==========")
+                    Log.d(TAG, "deviceID: $deviceID")
+                    Log.d(TAG, "value: $valueCents")
+                    Log.d(TAG, "currency: $finalCurrency")
                 Log.d(TAG, "route: $finalSuccessfulRoute (${if (finalSuccessfulRoute == 1) "RECYCLER可找零" else "CASHBOX不可找零"})")
-                Log.d(TAG, "HTTP Code: ${response.code()}")
-                Log.d(TAG, "Response Body: $responseBody")
-                Log.d(TAG, "✓ 设备保持连接状态，可以继续使用其他功能")
-                
-                // 成功后立即刷新货币分配（确保 UI 立即反映最新状态）
-                try {
-                    Log.d(TAG, "开始刷新货币分配以验证设置是否生效...")
-                    val refreshedAssignments = fetchCurrencyAssignments(deviceID)
-                    Log.d(TAG, "✓ 货币分配刷新成功: 面额数=${refreshedAssignments.size}")
+                    Log.d(TAG, "HTTP Code: ${response.code()}")
+                    Log.d(TAG, "Response Body: $responseBody")
+                    Log.d(TAG, "✓ 设备保持连接状态，可以继续使用其他功能")
                     
-                    // 验证设置是否生效：查找对应的面额，检查 AcceptRoute
-                    val targetAssignment = refreshedAssignments.find { it.value == valueCents }
-                    if (targetAssignment != null) {
+                    // 成功后立即刷新货币分配（确保 UI 立即反映最新状态）
+                    try {
+                        Log.d(TAG, "开始刷新货币分配以验证设置是否生效...")
+                        val refreshedAssignments = fetchCurrencyAssignments(deviceID)
+                        Log.d(TAG, "✓ 货币分配刷新成功: 面额数=${refreshedAssignments.size}")
+                        
+                        // 验证设置是否生效：查找对应的面额，检查 AcceptRoute
+                        val targetAssignment = refreshedAssignments.find { it.value == valueCents }
+                        if (targetAssignment != null) {
                         val expectedRoute = if (finalSuccessfulRoute == 1) "PAYOUT" else "CASHBOX"
-                        val actualRoute = targetAssignment.acceptRoute ?: "UNKNOWN"
-                        Log.d(TAG, "设置验证: 面额=$valueCents, 期望Route=$expectedRoute, 实际Route=$actualRoute")
-                        if (actualRoute.equals(expectedRoute, ignoreCase = true)) {
-                            Log.d(TAG, "✓ 设置验证成功: Route 已正确更新")
+                            val actualRoute = targetAssignment.acceptRoute ?: "UNKNOWN"
+                            Log.d(TAG, "设置验证: 面额=$valueCents, 期望Route=$expectedRoute, 实际Route=$actualRoute")
+                            if (actualRoute.equals(expectedRoute, ignoreCase = true)) {
+                                Log.d(TAG, "✓ 设置验证成功: Route 已正确更新")
+                            } else {
+                                Log.w(TAG, "⚠ 设置验证警告: Route 可能未立即更新（可能需要等待设备处理）")
+                            }
                         } else {
-                            Log.w(TAG, "⚠ 设置验证警告: Route 可能未立即更新（可能需要等待设备处理）")
+                            Log.w(TAG, "⚠ 设置验证警告: 未找到面额 $valueCents 的配置")
                         }
-                    } else {
-                        Log.w(TAG, "⚠ 设置验证警告: 未找到面额 $valueCents 的配置")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "刷新货币分配失败（设备保持连接）", e)
+                        // 即使刷新失败，也认为设置成功（因为 API 返回成功）
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "刷新货币分配失败（设备保持连接）", e)
-                    // 即使刷新失败，也认为设置成功（因为 API 返回成功）
-                }
-                return true
+                    return true
             }
             
             // 所有 route 都失败
@@ -3908,7 +4131,7 @@ class CashDeviceRepository(
             
             // 2. 解析文本响应（包含所有计数项）
             try {
-                parseCountersResponse(response.body()!!, deviceID)
+            parseCountersResponse(response.body()!!, deviceID)
             } catch (parseException: Exception) {
                 // ⚠️ 非致命警告：解析失败只记录日志，返回包含 error 的响应
                 Log.w(TAG, "⚠️ GetCounters 解析失败（非致命）: deviceID=$deviceID", parseException)

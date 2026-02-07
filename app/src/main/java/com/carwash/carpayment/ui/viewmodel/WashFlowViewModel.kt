@@ -254,7 +254,7 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
             
             // 1. 启动现金设备会话
             val devices = try {
-                cashDeviceRepository.startCashSession()
+                cashDeviceRepository.startCashSession(caller = "WASHFLOW_CASH_PAYMENT")
             } catch (e: Exception) {
                 Log.e(TAG, "[WashFlow] 现金支付：启动设备会话失败", e)
                 return@withContext PaymentResult.Failure("设备连接失败: ${e.message}")

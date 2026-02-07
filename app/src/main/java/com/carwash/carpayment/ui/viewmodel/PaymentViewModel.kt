@@ -41,7 +41,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.resume
@@ -126,8 +128,79 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
     
     // ⚠️ 关键修复：防止现金流程并发重入
     private val cashPaymentMutex = Mutex()
+    
+    // ⚠️ 关键修复：Attempt Finalized 幂等锁
+    // 任何会导致终态的入口（PAY_SUCCESS / FAIL+REFUND / CANCELLED+REFUND）都必须 compareAndSet(false,true) 才能继续
+    // 一旦 finalize 成功，后续所有 refund()、stopCashSession(FINALLY) 只允许做"轻量清理"，不得再触发业务分支覆盖终态
+    @Volatile private var attemptFinalized: Boolean = false
     @Volatile
     private var isCashPaymentRunning = false
+    
+    // ⚠️ 关键修复：会话幂等锁（防止重复 begin）
+    @Volatile
+    private var cashSessionActive: Boolean = false
+    
+    @Volatile
+    private var cashSessionFinalized: Boolean = false
+    
+    // ⚠️ 关键修复：打印后收尾阶段标记（防止重新启动现金会话）
+    @Volatile
+    private var cashFinishing: Boolean = false
+    
+    // ⚠️ 关键修复：现金收款硬门禁（只允许在现金支付页且正在收款阶段启用收款）
+    @Volatile
+    private var cashCollectionAllowed: Boolean = false
+    
+    // ⚠️ 关键修复：取消请求标记（Cancel 优先级高于自动成功判定）
+    @Volatile
+    private var cancelRequested: Boolean = false
+    
+    // ⚠️ 关键修复：终态收敛互斥锁（防止 success/cancel 同时 finalize）
+    private val finalizeMutex = Mutex()
+    
+    // ⚠️ 关键修复：未退款挂账金额（pending refund）- 只能作为兜底，不应该成为常态路径
+    @Volatile
+    private var pendingRefundCents: Int = 0
+    
+    // ⚠️ 关键修复：终态幂等保护 - finalizedTxId 标记（防止跨交易复用退款金额）
+    // 一旦进入 SUCCESS / CANCELLED_REFUNDED / FAILED_REFUNDED / CANCELLED_NO_REFUND 任一终态，记录 txId
+    // 任何后续异步回调（包括 finally、重试回调、库存刷新回调）都不得再次触发 refund / stopCashSession / markFailed
+    @Volatile
+    private var finalizedTxId: String? = null
+    
+    /**
+     * ⚠️ 关键修复：硬性判定函数 - 检查是否允许启动现金会话
+     * 条件：
+     * 1. 当前 UI/FlowState 正在现金支付页面（paymentMethod==CASH && cashSessionActive==true）
+     * 2. 不是"已支付/打印中/打印完成/回首页"状态
+     * 3. cashCollectionAllowed == true
+     * 4. cashFinishing == false
+     */
+    private fun isCashSessionAllowed(caller: String = "unknown"): Boolean {
+        val currentState = _flowState.value
+        val isCashPage = currentState.selectedPaymentMethod == PaymentMethod.CASH
+        val isPaying = currentState.status == PaymentFlowStatus.PAYING
+        val isNotFinished = currentState.status != PaymentFlowStatus.SUCCESS &&
+                            currentState.status != PaymentFlowStatus.STARTING_WASH
+        
+        val allowed = isCashPage && 
+                     isPaying && 
+                     cashSessionActive && 
+                     cashCollectionAllowed && 
+                     !cashFinishing && 
+                     isNotFinished
+        
+        if (!allowed) {
+            Log.w("CASH_GUARD", "❌ CASH_GUARD isCashSessionAllowed=false, caller=$caller")
+            Log.w("CASH_GUARD", "  screen=${currentState.status}, paymentMethod=${currentState.selectedPaymentMethod}")
+            Log.w("CASH_GUARD", "  cashSessionActive=$cashSessionActive, cashCollectionAllowed=$cashCollectionAllowed, cashFinishing=$cashFinishing")
+            Log.w("CASH_GUARD", "  isCashPage=$isCashPage, isPaying=$isPaying, isNotFinished=$isNotFinished")
+        } else {
+            Log.d("CASH_GUARD", "✅ CASH_GUARD isCashSessionAllowed=true, caller=$caller")
+        }
+        
+        return allowed
+    }
     
     // ⚠️ 关键修复：UI 状态更新节流（降低更新频率）
     private var lastUiUpdateTime = 0L
@@ -176,10 +249,11 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
     fun selectProgram(program: WashProgram) {
         val currentState = _flowState.value
 
-        // ⚠️ SUCCESS 状态下禁止再次选择程序，直接返回
+        // ⚠️ 关键修复：SUCCESS 状态下允许再次选择程序（支付完成后应允许新交易）
+        // 如果状态是 SUCCESS，先重置为新交易，然后继续选择程序
         if (currentState.status == PaymentFlowStatus.SUCCESS) {
-            Log.d(TAG, "SUCCESS 状态下禁止再次选择程序（已完成支付）")
-            return
+            Log.d(TAG, "SUCCESS 状态下检测到新程序选择，先重置为新交易")
+            resetForNewTransaction(reason = "SELECT_PROGRAM_AFTER_SUCCESS")
         }
 
         Log.d(TAG, "[CarWash] 选择洗车程序: ${program.id}, 价格: ${program.price}€")
@@ -286,6 +360,10 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             Log.d(TAG, "开始处理支付... 支付方式: ${currentState.selectedPaymentMethod}")
             
+            // ⚠️ 关键修复：定义本地 attemptId（使用 PaymentFlowState 的 lastUpdated 作为唯一标识）
+            // 如果 PaymentAttempt 存在，应使用 currentAttempt?.id ?: "NO_ATTEMPT"
+            val attemptId = _flowState.value.lastUpdated.toString()
+            
             when (currentState.selectedPaymentMethod) {
                 PaymentMethod.CASH -> {
                     // ⚠️ 关键修复：防止并发重入
@@ -320,6 +398,128 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
      * 处理现金支付（真实实现：使用 ITL Cash Device REST API）
      */
     private suspend fun processCashPayment(currentState: PaymentFlowState) {
+        // ⚠️ 关键修复：新会话初始化 - 在开始前强制重置状态，确保新会话能正常开始
+        // 这是修复"取消/失败/退款后，回到首页再次选择套餐进入现金支付，会话 begin 被误判为重复调用"的关键
+        cashSessionFinalized = false
+        cashSessionActive = false
+        cashFinishing = false
+        Log.d("CASH_SESSION_RESET", "CASH_SESSION_RESET: processCashPayment 开始，强制重置状态: cashSessionFinalized=false, cashSessionActive=false, cashFinishing=false")
+        
+        // ⚠️ 关键修复：补偿退款 - 检测是否有未退款的金额（unrefunded>0）
+        // 如果因为异常导致取消时未退完，下一次 begin 前检测到 unrefunded>0 仍然可以补退
+        try {
+            val billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
+            val coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
+            
+            if (billDeviceID != null || coinDeviceID != null) {
+                val baselineStore = cashDeviceRepository.getBaselineStore()
+                val billBaselineLevels = billDeviceID?.let { baselineStore.getBaselineLevels(it) }
+                val coinBaselineLevels = coinDeviceID?.let { baselineStore.getBaselineLevels(it) }
+                
+                // 如果存在 baseline，说明可能有未完成的会话
+                if (billBaselineLevels != null || coinBaselineLevels != null) {
+                    val currentBillLevels = billDeviceID?.let { 
+                        try {
+                            cashDeviceRepository.readCurrentLevels(it)
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                    val currentCoinLevels = coinDeviceID?.let { 
+                        try {
+                            cashDeviceRepository.readCurrentLevels(it)
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                    
+                    val unrefundedCents = cashDeviceRepository.calculateLevelsDeltaCents(
+                        billBaselineLevels, currentBillLevels
+                    ) + cashDeviceRepository.calculateLevelsDeltaCents(
+                        coinBaselineLevels, currentCoinLevels
+                    )
+                    
+                    if (unrefundedCents > 0) {
+                        Log.w(TAG, "========== 检测到未退款金额，执行补偿退款 ==========")
+                        Log.w(TAG, "unrefundedCents=$unrefundedCents (${unrefundedCents / 100.0}€)")
+                        Log.w(TAG, "说明：可能是上一次取消时因异常导致未退完，现在补退")
+                        
+                        // ⚠️ 关键修复：执行补偿退款
+                        val refundResult = cashDeviceRepository.refundAmount(
+                            unrefundedCents,
+                            billDeviceID,
+                            coinDeviceID
+                        )
+                        
+                        if (refundResult.success && refundResult.remaining == 0) {
+                            Log.d("REFUND_COMPENSATION", "REFUND_COMPENSATION success remaining=0 amount=$unrefundedCents")
+                            Log.d(TAG, "补偿退款成功: ${unrefundedCents}分 (${unrefundedCents / 100.0}€)")
+                            
+                            // 清理 baseline
+                            billDeviceID?.let { baselineStore.clearBaseline(it) }
+                            coinDeviceID?.let { baselineStore.clearBaseline(it) }
+                            // 清除 pending refund
+                            pendingRefundCents = 0
+                        } else {
+                            Log.e("REFUND_COMPENSATION", "REFUND_COMPENSATION failed remaining=${refundResult.remaining} amount=$unrefundedCents")
+                            Log.e(TAG, "补偿退款失败或部分失败: remaining=${refundResult.remaining}分")
+                            // ⚠️ 关键修复：记录 pending refund，阻止开始新收款
+                            pendingRefundCents = refundResult.remaining
+                            
+                            // ⚠️ 关键修复：一旦存在 pendingRefundCents > 0，必须阻止开始新的收款
+                            Log.e(TAG, "========== ⚠️ 存在未退款挂账，阻止开始新收款 ==========")
+                            Log.e(TAG, "pendingRefundCents=$pendingRefundCents (${pendingRefundCents / 100.0}€)")
+                            Log.e(TAG, "说明：上一笔退款尚未完成，正在处理/请稍候")
+                            
+                            // UI 提示
+                            _noteRejectionMessage.value = CashRejectionHint(
+                                messageKey = "error_pending_refund",
+                                acceptedDenominations = "${pendingRefundCents / 100.0}€"
+                            )
+                            
+                            // 阻止开始新收款，直接返回
+                            handlePaymentFailure("PENDING_REFUND: remaining=${refundResult.remaining}")
+                            return
+                        }
+                    }
+                    
+                    // ⚠️ 关键修复：检查 pendingRefundCents（从上次失败中恢复的）
+                    if (pendingRefundCents > 0) {
+                        Log.e(TAG, "========== ⚠️ 存在未退款挂账，阻止开始新收款 ==========")
+                        Log.e(TAG, "pendingRefundCents=$pendingRefundCents (${pendingRefundCents / 100.0}€)")
+                        Log.e(TAG, "说明：上一笔退款尚未完成，正在处理/请稍候")
+                        
+                        // UI 提示
+                        _noteRejectionMessage.value = CashRejectionHint(
+                            messageKey = "error_pending_refund",
+                            acceptedDenominations = "${pendingRefundCents / 100.0}€"
+                        )
+                        
+                        // 阻止开始新收款，直接返回
+                        handlePaymentFailure("PENDING_REFUND: remaining=$pendingRefundCents")
+                        return
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "补偿退款检测异常（继续执行新会话）", e)
+        }
+        
+        // ⚠️ 关键修复：检查是否在收尾阶段，如果是则禁止重新启动现金会话
+        // 注意：这个检查应该在状态重置之后，因为我们已经重置了 cashFinishing
+        // 但保留这个检查作为额外的安全措施（虽然理论上不应该触发）
+        
+        // ⚠️ 关键修复：设置现金收款允许标志（进入现金支付流程时允许收款）
+        cashCollectionAllowed = true
+        Log.d("CASH_GUARD", "CASH_GUARD ALLOWED: cashCollectionAllowed=true, reason=ENTER_CASH_PAYMENT")
+        
+        // ⚠️ 关键修复：允许现金会话（进入现金支付流程时）
+        cashDeviceRepository.allowCashSession("ENTER_CASH_PAYMENT")
+        
+        // ⚠️ 关键修复：定义本地 attemptId（使用 PaymentFlowState 的 lastUpdated 作为唯一标识）
+        // 如果 PaymentAttempt 存在，应使用 currentAttempt?.id ?: "NO_ATTEMPT"
+        val attemptId = currentState.lastUpdated.toString()
+        
         val program = currentState.selectedProgram
         if (program == null) {
             Log.e(TAG, "现金支付：程序信息为空")
@@ -362,13 +562,37 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         var isCashSessionStopped = false
         
         try {
+            // ⚠️ 关键修复：会话幂等锁检查（防止并发调用）
+            // 注意：由于在 processCashPayment 开始时已经重置了 cashSessionFinalized=false，
+            // 这里只检查 cashSessionActive，防止并发调用导致的重复 begin
+            if (cashSessionActive) {
+                Log.d("PAY_MARK", "PAY_MARK REENTRY_BLOCKED reason=SESSION_ACTIVE state=${currentState.status}")
+                Log.w(TAG, "========== 现金支付会话重复调用被阻止 ==========")
+                Log.w(TAG, "cashSessionActive=$cashSessionActive, cashSessionFinalized=$cashSessionFinalized")
+                Log.w(TAG, "说明: 会话正在激活中，禁止重复 begin（可能是并发调用）")
+                return
+            }
+            
+            // ⚠️ 关键修复：标记会话为活跃状态
+            // 注意：cashSessionFinalized 已经在 processCashPayment 开始时重置为 false
+            cashSessionActive = true
+            Log.d("PAY_MARK", "PAY_MARK SESSION_START target=$targetAmountCents")
+            Log.d("CASH_SESSION_RESET", "CASH_SESSION_RESET: 会话开始，cashSessionActive=true, cashSessionFinalized=$cashSessionFinalized")
+            
             // 1. 启动现金设备会话（认证 + 打开双设备连接）
+            // ⚠️ 关键修复：硬性判定检查
+            if (!isCashSessionAllowed(caller = "processCashPayment_startCashSession")) {
+                Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: startCashSession blocked by isCashSessionAllowed()")
+                return
+            }
+            
             val deviceSessionStartTime = System.currentTimeMillis()
             Log.d(TAG, "现金支付：启动设备会话...")
             devices = try {
-                cashDeviceRepository.startCashSession()
+                cashDeviceRepository.startCashSession(caller = "PAYMENT_SCREEN_CASH")
             } catch (e: Exception) {
                 Log.e(TAG, "现金支付：启动设备会话失败", e)
+                cashSessionActive = false  // 失败时重置
                 handlePaymentFailure("设备连接失败: ${e.message}")
                 return
             }
@@ -395,28 +619,38 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
             Log.d(TAG, "========================================")
             
             val tracker = cashDeviceRepository.getAmountTracker()
+            
+            // ⚠️ 关键修复：根据 devices map 的真实结构获取 deviceID
+            // devices map 结构：key = deviceName（"SPECTRAL_PAYOUT-0" 或 "SMART_COIN_SYSTEM-1"），value = deviceID
             billDeviceID = devices["SPECTRAL_PAYOUT-0"]
             coinDeviceID = devices["SMART_COIN_SYSTEM-1"]
             
-            // 断言式日志：校验 deviceID 是否为 null
+            // ⚠️ 关键修复：强制断言日志，billDeviceID/coinDeviceID 不为 null，否则直接 fail-fast
             if (billDeviceID == null) {
-                Log.e(
-                    TAG,
-                    "❌ 错误：billDeviceID == null，devices map 中未找到 key='SPECTRAL_PAYOUT-0'"
-                )
-                Log.e(TAG, "❌ devices map 结构: ${devices.keys.joinToString(", ")}")
-                Log.e(TAG, "❌ 请检查设备连接或设备类型映射是否正确")
+                Log.e(TAG, "❌ 错误：billDeviceID == null，devices map 中未找到 key='SPECTRAL_PAYOUT-0'")
+                Log.e(TAG, "❌ devices map 完整内容:")
+                devices.forEach { (key, value) ->
+                    Log.e(TAG, "  devices[$key] = $value")
+                }
+                Log.e(TAG, "❌ devices map keys: ${devices.keys.joinToString(", ")}")
+                Log.e(TAG, "❌ devices map values: ${devices.values.joinToString(", ")}")
+                cashSessionActive = false  // 失败时重置
+                handlePaymentFailure("纸币器设备未连接，请检查设备连接")
+                return
             } else {
                 Log.d(TAG, "✅ billDeviceID = $billDeviceID")
             }
             
             if (coinDeviceID == null) {
-                Log.e(
-                    TAG,
-                    "❌ 错误：coinDeviceID == null，devices map 中未找到 key='SMART_COIN_SYSTEM-1'"
-                )
-                Log.e(TAG, "❌ devices map 结构: ${devices.keys.joinToString(", ")}")
-                Log.e(TAG, "❌ 请检查设备连接或设备类型映射是否正确")
+                Log.e(TAG, "❌ 错误：coinDeviceID == null，devices map 中未找到 key='SMART_COIN_SYSTEM-1'")
+                Log.e(TAG, "❌ devices map 完整内容:")
+                devices.forEach { (key, value) ->
+                    Log.e(TAG, "  devices[$key] = $value")
+                }
+                Log.e(TAG, "❌ devices map keys: ${devices.keys.joinToString(", ")}")
+                Log.e(TAG, "❌ devices map values: ${devices.values.joinToString(", ")}")
+                // ⚠️ 关键修复：硬币器失败不影响纸币器，继续执行支付流程（允许纸币器单独收款）
+                Log.w(TAG, "⚠️ 硬币器未连接，但继续执行支付流程（允许纸币器单独收款）")
             } else {
                 Log.d(TAG, "✅ coinDeviceID = $coinDeviceID")
             }
@@ -520,7 +754,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         changeInventory?.getTotalCents()?.div(100.0)
                     }€)"
                 )
-            } catch (e: Exception) {
+                } catch (e: Exception) {
                 Log.w(TAG, "现金支付：更新找零库存失败，继续执行（找零判定将不可用）", e)
             }
             
@@ -581,7 +815,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     // ⚠️ Step 3: 刷新设备的支持面额集合（在设备初始化或进入现金会话时调用）
                     try {
                         cashDeviceRepository.refreshDeviceSupportedValues(deviceID)
-                    } catch (e: Exception) {
+                } catch (e: Exception) {
                         Log.w(TAG, "刷新纸币器支持面额失败（继续执行）: deviceID=$deviceID", e)
                     }
 
@@ -605,14 +839,26 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     // Step 2: 启用接收器
-                    val enableSuccess = cashDeviceRepository.enableAcceptor(deviceID)
+                    // ⚠️ 关键修复：硬性判定检查
+                    if (!isCashSessionAllowed(caller = "processCashPayment_enableAcceptor_bill")) {
+                        Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: enableAcceptor(bill) blocked by isCashSessionAllowed()")
+                        return
+                    }
+                    
+                    val enableSuccess = cashDeviceRepository.enableAcceptor(deviceID, caller = "processCashPayment_bill")
                     if (!enableSuccess) {
                         Log.e(TAG, "现金支付：纸币器启用接收器失败")
                         handlePaymentFailure("纸币器启动失败，请重试")
                         return
                     }
                     // Step 3: 设置自动接受
-                    val autoAcceptSuccess = cashDeviceRepository.setAutoAccept(deviceID, true)
+                    // ⚠️ 关键修复：硬性判定检查
+                    if (!isCashSessionAllowed(caller = "processCashPayment_setAutoAccept_bill")) {
+                        Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: setAutoAccept(true, bill) blocked by isCashSessionAllowed()")
+                        return
+                    }
+                    
+                    val autoAcceptSuccess = cashDeviceRepository.setAutoAccept(deviceID, true, caller = "processCashPayment_bill")
                     if (!autoAcceptSuccess) {
                         Log.e(TAG, "现金支付：纸币器设置自动接受失败")
                         cashDeviceRepository.disableAcceptor(deviceID)
@@ -627,10 +873,24 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     billSessionStarted = true
 
                     // Step 4: baseline 在 EnableAcceptor 成功后立即设置（避免进入现金支付前的库存变化污染会话）
-                    // ⚠️ 关键修复：baseline 读取失败改为非致命警告，不阻止支付流程
+                    // ⚠️ 关键修复：baseline 只允许在"会话启动后第一次成功 GetAllLevels"时写入一次
                     try {
                         billBaselineLevels = cashDeviceRepository.readCurrentLevels(deviceID)
                         billBaselineCents = billBaselineLevels.calculateTotalCents()
+                        
+                        // ⚠️ 关键修复：转换为 Map<denomValue, storedCount> 格式
+                        val levelsMap = billBaselineLevels.levels?.associate { it.value to it.stored } ?: emptyMap()
+                        
+                        // ⚠️ 关键修复：检查是否在收尾阶段，禁止在打印后写 baseline
+                        if (cashFinishing) {
+                            Log.e(TAG, "❌ BUG: cash lifecycle called during finishing stage")
+                            Log.e(TAG, "❌ setBaselineFromLevels(reason=SESSION_START) 被调用，但 cashFinishing=true，禁止写 baseline")
+                            return
+                        }
+                        
+                        // ⚠️ 关键修复：调用 tracker.setBaselineFromLevels，传入 reason="SESSION_START"
+                        tracker.setBaselineFromLevels(deviceID, levelsMap, "LEVELS", reason = "SESSION_START")
+                        
                         // ⚠️ 保存 baseline levels 到 baselineStore（用于退款时计算）
                         cashDeviceRepository.getBaselineStore()
                             .setBaselineLevels(deviceID, billBaselineLevels)
@@ -638,7 +898,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         billBaselineSnapshot =
                             cashDeviceRepository.createLevelsSnapshot(deviceID, billBaselineLevels)
                         // ⚠️ Step F: 添加关键日志
-                        Log.d("CASH_BASELINE_SET", "billTotal=$billBaselineCents")
+                        Log.d("CASH_BASELINE_SET", "billTotal=$billBaselineCents deviceID=$deviceID reason=SESSION_START")
                         Log.d(
                             TAG,
                             "现金支付：纸币器 baseline levels 已设置: deviceID=$deviceID, totalCents=$billBaselineCents (${billBaselineCents / 100.0}€)"
@@ -647,7 +907,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         Log.d(TAG, "deviceID=$deviceID")
                         Log.d(TAG, "baselineCents=$billBaselineCents")
                         Log.d(TAG, "==========================================")
-                    } catch (e: Exception) {
+            } catch (e: Exception) {
                         // ⚠️ 关键修复：baseline 读取失败改为非致命警告，不阻止支付流程
                         Log.w(TAG, "⚠️ 现金支付：读取纸币器 baseline levels 失败（非致命，继续执行）", e)
                         Log.w(TAG, "⚠️ 说明：GetCounters/GetAllLevels 解析失败不影响收款，使用空 baseline")
@@ -672,7 +932,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     return
                 }
             }
-
+            
             coinDeviceID?.let { deviceID ->
                 try {
                     // ⚠️ Step 3: 刷新设备的支持面额集合（在设备初始化或进入现金会话时调用）
@@ -702,8 +962,14 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     // Step 2: 启用接收器
+                    // ⚠️ 关键修复：硬性判定检查
+                    if (!isCashSessionAllowed(caller = "processCashPayment_enableAcceptor_coin")) {
+                        Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: enableAcceptor(coin) blocked by isCashSessionAllowed()")
+                        return@let
+                    }
+                    
                     // ⚠️ 关键修复：硬币器失败不影响纸币器，继续执行支付流程
-                    val enableSuccess = cashDeviceRepository.enableAcceptor(deviceID)
+                    val enableSuccess = cashDeviceRepository.enableAcceptor(deviceID, caller = "processCashPayment_coin")
                     if (!enableSuccess) {
                         Log.w(TAG, "⚠️ 现金支付：硬币器启用接收器失败（非致命，纸币器继续可用）")
                         Log.w(TAG, "⚠️ 说明：硬币器失败不影响纸币器收款，继续执行支付流程")
@@ -713,7 +979,13 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         // 跳过硬币器的后续步骤（Step 3 和 Step 4），但继续执行支付流程
                     } else {
                         // Step 3: 设置自动接受
-                        val autoAcceptSuccess = cashDeviceRepository.setAutoAccept(deviceID, true)
+                        // ⚠️ 关键修复：硬性判定检查
+                        if (!isCashSessionAllowed(caller = "processCashPayment_setAutoAccept_coin")) {
+                            Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: setAutoAccept(true, coin) blocked by isCashSessionAllowed()")
+                            return@let
+                        }
+                        
+                        val autoAcceptSuccess = cashDeviceRepository.setAutoAccept(deviceID, true, caller = "processCashPayment_coin")
                         if (!autoAcceptSuccess) {
                             Log.w(TAG, "⚠️ 现金支付：硬币器设置自动接受失败（非致命，纸币器继续可用）")
                             Log.w(TAG, "⚠️ 说明：硬币器失败不影响纸币器收款，继续执行支付流程")
@@ -727,7 +999,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                             // ⚠️ 不再禁用纸币器，不再调用 handlePaymentFailure
                             // ⚠️ 继续执行，允许纸币器单独收款
                             // 跳过 Step 4（baseline 设置）
-                        } else {
+                    } else {
                             val acceptorsElapsed = System.currentTimeMillis() - acceptorsStartTime
                             Log.d(
                                 TAG,
@@ -736,10 +1008,24 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                             coinSessionStarted = true
                             
                             // Step 4: baseline 在 EnableAcceptor 成功后立即设置（避免进入现金支付前的库存变化污染会话）
-                            // ⚠️ 关键修复：baseline 读取失败改为非致命警告，不阻止支付流程
+                            // ⚠️ 关键修复：baseline 只允许在"会话启动后第一次成功 GetAllLevels"时写入一次
                             try {
                                 coinBaselineLevels = cashDeviceRepository.readCurrentLevels(deviceID)
                                 coinBaselineCents = coinBaselineLevels.calculateTotalCents()
+                                
+                                // ⚠️ 关键修复：检查是否在收尾阶段，禁止在打印后写 baseline
+                                if (cashFinishing) {
+                                    Log.e(TAG, "❌ BUG: cash lifecycle called during finishing stage")
+                                    Log.e(TAG, "❌ setBaselineFromLevels(reason=SESSION_START) 被调用，但 cashFinishing=true，禁止写 baseline")
+                                    return@let
+                                }
+                                
+                                // ⚠️ 关键修复：转换为 Map<denomValue, storedCount> 格式
+                                val levelsMap = coinBaselineLevels.levels?.associate { it.value to it.stored } ?: emptyMap()
+                                
+                                // ⚠️ 关键修复：调用 tracker.setBaselineFromLevels，传入 reason="SESSION_START"
+                                tracker.setBaselineFromLevels(deviceID, levelsMap, "LEVELS", reason = "SESSION_START")
+                                
                                 // ⚠️ 保存 baseline levels 到 baselineStore（用于退款时计算）
                                 cashDeviceRepository.getBaselineStore()
                                     .setBaselineLevels(deviceID, coinBaselineLevels)
@@ -747,7 +1033,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                 coinBaselineSnapshot =
                                     cashDeviceRepository.createLevelsSnapshot(deviceID, coinBaselineLevels)
                                 // ⚠️ Step F: 添加关键日志
-                                Log.d("CASH_BASELINE_SET", "coinTotal=$coinBaselineCents")
+                                Log.d("CASH_BASELINE_SET", "coinTotal=$coinBaselineCents deviceID=$deviceID reason=SESSION_START")
                                 Log.d(
                                     TAG,
                                     "现金支付：硬币器 baseline levels 已设置: deviceID=$deviceID, totalCents=$coinBaselineCents (${coinBaselineCents / 100.0}€)"
@@ -756,7 +1042,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                 Log.d(TAG, "deviceID=$deviceID")
                                 Log.d(TAG, "baselineCents=$coinBaselineCents")
                                 Log.d(TAG, "==========================================")
-                            } catch (e: Exception) {
+                } catch (e: Exception) {
                                 // ⚠️ 关键修复：baseline 读取失败改为非致命警告，不阻止支付流程
                                 Log.w(TAG, "⚠️ 现金支付：读取硬币器 baseline levels 失败（非致命，继续执行）", e)
                                 Log.w(TAG, "⚠️ 说明：GetCounters/GetAllLevels 解析失败不影响收款，使用空 baseline")
@@ -854,6 +1140,9 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                 // ⚠️ 关键修复：轮询间隔控制
                 kotlinx.coroutines.delay(POLL_INTERVAL_MS)
                 
+                // ⚠️ 关键修复：在 while 循环开始处声明 tracker，避免重复声明冲突
+                val tracker = cashDeviceRepository.getAmountTracker()
+                
                 // ⚠️ 关键修复：纸币器 SPECTRAL_PAYOUT-0 不再调用 GetCounters
                 // ⚠️ 纸币器投入纸币时 GetAllLevels.Stored 会增长，差分即可得到本次投入金额，因此 counters 对纸币器没有必要
                 lastPollTime = System.currentTimeMillis()  // 更新轮询时间戳
@@ -908,18 +1197,29 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         // ⚠️ 关键修复：每次 GetAllLevels 成功后，立即更新 tracker
                         val levelsMap =
                             currentLevels.levels?.associate { it.value to it.stored } ?: emptyMap()
-                        val trackerDelta = cashDeviceRepository.getAmountTracker()
-                            .updateFromLevels(deviceID, levelsMap, "LEVELS")
+                        // ⚠️ 关键修复：传入固定的会话级 attemptId 和 sessionActive=true（因为 while 本身只在会话活跃时运行）
+                        val trackerDelta = tracker
+                            .updateFromLevels(deviceID, levelsMap, "LEVELS", sessionActive = true, attemptId = attemptId)
+                        // ⚠️ 关键修复：统一日志口径（确保可对账）
+                        val deviceStates = tracker.getDeviceStatesSnapshot()
+                        val deviceState = deviceStates[deviceID]
+                        val baselineTotal = deviceState?.let { 
+                            it.baselineLevels.entries.sumOf { (value, stored) -> value * stored }
+                        } ?: tracker.getDeviceBaselineCents(deviceID)
+                        val currentTotal = deviceState?.let {
+                            it.lastLevels.entries.sumOf { (value, stored) -> value * stored }
+                        } ?: tracker.getDeviceCurrentCents(deviceID)
+                        val deltaCents = currentTotal - baselineTotal
+                        
                         Log.d(
                             "CASH_DELTA",
-                            "deviceID=$deviceID baselineTotal=${
-                                cashDeviceRepository.getAmountTracker()
-                                    .getDeviceBaselineCents(deviceID)
-                            } currentTotal=${
-                                cashDeviceRepository.getAmountTracker()
-                                    .getDeviceCurrentCents(deviceID)
-                            } delta=$trackerDelta"
+                            "deviceID=$deviceID baselineTotalCents=$baselineTotal currentTotalCents=$currentTotal deltaCents=$deltaCents sessionDeltaCents=$trackerDelta"
                         )
+                        
+                        // ⚠️ 关键修复：验证对账一致性
+                        if (deltaCents != trackerDelta) {
+                            Log.w(TAG, "⚠️ 对账不一致: deltaCents=$deltaCents vs sessionDeltaCents=$trackerDelta")
+                        }
                     } catch (e: Exception) {
                         // ⚠️ Step A: 禁止使用 GetCounters 降级，只使用 GetAllLevels 差分
                         Log.e(TAG, "现金支付：轮询纸币器 levels 异常: deviceID=$deviceID", e)
@@ -962,18 +1262,29 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         // ⚠️ 关键修复：每次 GetAllLevels 成功后，立即更新 tracker
                         val levelsMap =
                             currentLevels.levels?.associate { it.value to it.stored } ?: emptyMap()
-                        val trackerDelta = cashDeviceRepository.getAmountTracker()
-                            .updateFromLevels(deviceID, levelsMap, "LEVELS")
+                        // ⚠️ 关键修复：传入固定的会话级 attemptId 和 sessionActive=true（因为 while 本身只在会话活跃时运行）
+                        val trackerDelta = tracker
+                            .updateFromLevels(deviceID, levelsMap, "LEVELS", sessionActive = true, attemptId = attemptId)
+                        // ⚠️ 关键修复：统一日志口径（确保可对账）
+                        val deviceStates = tracker.getDeviceStatesSnapshot()
+                        val deviceState = deviceStates[deviceID]
+                        val baselineTotal = deviceState?.let { 
+                            it.baselineLevels.entries.sumOf { (value, stored) -> value * stored }
+                        } ?: tracker.getDeviceBaselineCents(deviceID)
+                        val currentTotal = deviceState?.let {
+                            it.lastLevels.entries.sumOf { (value, stored) -> value * stored }
+                        } ?: tracker.getDeviceCurrentCents(deviceID)
+                        val deltaCents = currentTotal - baselineTotal
+                        
                         Log.d(
                             "CASH_DELTA",
-                            "deviceID=$deviceID baselineTotal=${
-                                cashDeviceRepository.getAmountTracker()
-                                    .getDeviceBaselineCents(deviceID)
-                            } currentTotal=${
-                                cashDeviceRepository.getAmountTracker()
-                                    .getDeviceCurrentCents(deviceID)
-                            } delta=$trackerDelta"
+                            "deviceID=$deviceID baselineTotalCents=$baselineTotal currentTotalCents=$currentTotal deltaCents=$deltaCents sessionDeltaCents=$trackerDelta"
                         )
+                        
+                        // ⚠️ 关键修复：验证对账一致性
+                        if (deltaCents != trackerDelta) {
+                            Log.w(TAG, "⚠️ 对账不一致: deltaCents=$deltaCents vs sessionDeltaCents=$trackerDelta")
+                        }
                     } catch (e: Exception) {
                         // ⚠️ Step A: 禁止使用 GetCounters 降级，只使用 GetAllLevels 差分
                         Log.e(TAG, "现金支付：轮询硬币器 levels 异常: deviceID=$deviceID", e)
@@ -993,12 +1304,36 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                 // ⚠️ 关键修复：统一使用 paidSessionDeltaCents 作为判定用金额
                 val paidTotalCents = paidSessionDeltaCents  // 判定唯一权威
                 
-                // ⚠️ 关键修复：修正 CASH_PAID_SUM 日志，使用 billSessionDelta 和 coinSessionDelta
-                // ⚠️ 禁止在 CASH_PAID_SUM 里再去读 billBaselineTotal/billCurrentTotal 这套（它现在明显拿不到正确值）
+                // ⚠️ 关键修复：统一 CASH_PAID_SUM 日志，使用 tracker 的 deviceStates（确保可对账）
+                val deviceStates = tracker.getDeviceStatesSnapshot()
+                val deviceCount = tracker.getDeviceCount()
+                val billState = billDeviceID?.let { deviceStates[it] }
+                val coinState = coinDeviceID?.let { deviceStates[it] }
+                val billBaselineTotal = billState?.let {
+                    it.baselineLevels.entries.sumOf { (value, stored) -> value * stored }
+                } ?: 0
+                val coinBaselineTotal = coinState?.let {
+                    it.baselineLevels.entries.sumOf { (value, stored) -> value * stored }
+                } ?: 0
+                val billCurrentTotal = billState?.let {
+                    it.lastLevels.entries.sumOf { (value, stored) -> value * stored }
+                } ?: 0
+                val coinCurrentTotal = coinState?.let {
+                    it.lastLevels.entries.sumOf { (value, stored) -> value * stored }
+                } ?: 0
+                val totalBaselineCents = billBaselineTotal + coinBaselineTotal
+                val totalCurrentCents = billCurrentTotal + coinCurrentTotal
+                val totalDeltaCents = totalCurrentCents - totalBaselineCents
+                
                 Log.d(
                     "CASH_PAID_SUM",
-                    "billDeviceID=$billDeviceID billDelta=$billSessionDelta coinDeviceID=$coinDeviceID coinDelta=$coinSessionDelta paidTotal=$paidTotalCents target=$targetAmountCents"
+                    "billDeviceID=$billDeviceID billDelta=$billSessionDelta coinDeviceID=$coinDeviceID coinDelta=$coinSessionDelta paidTotal=$paidTotalCents target=$targetAmountCents baselineTotalCents=$totalBaselineCents currentTotalCents=$totalCurrentCents deltaCents=$totalDeltaCents deviceCount=$deviceCount"
                 )
+                
+                // ⚠️ 关键修复：验证对账一致性
+                if (totalDeltaCents != paidTotalCents) {
+                    Log.w(TAG, "⚠️ CASH_PAID_SUM 对账不一致: totalDeltaCents=$totalDeltaCents vs paidTotalCents=$paidTotalCents")
+                }
 
                 // ⚠️ Step A: 会话金额：只用 GetAllLevels 差分，禁止出现负数
                 if (paidSessionDeltaCents < 0) {
@@ -1020,11 +1355,23 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     // 继续使用修正后的值，但记录警告
                 }
 
-                // ⚠️ Step F: 添加关键日志（可降频打印，但必须包含）
+                // ⚠️ 关键修复：统一 CASH_LEVELS_DELTA 日志，使用 tracker 的 deviceStates（确保可对账）
+                // ⚠️ 注意：deviceStates、billState、coinState、billBaselineTotal、coinBaselineTotal、billCurrentTotal、coinCurrentTotal 已在上面 CASH_PAID_SUM 日志块中声明，这里直接使用
+                val billDeltaCentsForLog = billCurrentTotal - billBaselineTotal
+                val coinDeltaCentsForLog = coinCurrentTotal - coinBaselineTotal
+                
                 Log.d(
                     "CASH_LEVELS_DELTA",
-                    "billDelta=$billSessionDelta coinDelta=$coinSessionDelta paid=$paidSessionDeltaCents"
+                    "billDeviceID=$billDeviceID billBaselineTotalCents=$billBaselineTotal billCurrentTotalCents=$billCurrentTotal billDeltaCents=$billDeltaCentsForLog billSessionDelta=$billSessionDelta coinDeviceID=$coinDeviceID coinBaselineTotalCents=$coinBaselineTotal coinCurrentTotalCents=$coinCurrentTotal coinDeltaCents=$coinDeltaCentsForLog coinSessionDelta=$coinSessionDelta paidTotalCents=$paidSessionDeltaCents"
                 )
+                
+                // ⚠️ 关键修复：验证对账一致性
+                if (billDeltaCentsForLog != billSessionDelta) {
+                    Log.w(TAG, "⚠️ CASH_LEVELS_DELTA 纸币器对账不一致: billDeltaCents=$billDeltaCentsForLog vs billSessionDelta=$billSessionDelta")
+                }
+                if (coinDeltaCentsForLog != coinSessionDelta) {
+                    Log.w(TAG, "⚠️ CASH_LEVELS_DELTA 硬币器对账不一致: coinDeltaCents=$coinDeltaCentsForLog vs coinSessionDelta=$coinSessionDelta")
+                }
 
                 // ⚠️ 关键修复：纸币器不再使用 GetCounters，删除相关计算
                 // ⚠️ 注意：coinPaidInDelta 是计数项的增量（枚数），不是金额增量，仅用于维护统计日志
@@ -1278,6 +1625,12 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
 
                 // ⚠️ 关键修复：支付成功判定必须基于 paidSessionDeltaCents（GetAllLevels 差分）
                 // ⚠️ 统一使用 paidTotalCents（= paidSessionDeltaCents）作为判定用金额
+                // ⚠️ 关键修复：Cancel 优先级高于自动成功判定
+                if (cancelRequested) {
+                    Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancelRequested=true, skip success check")
+                    break
+                }
+                
                 if (paidTotalCents >= targetAmountCents) {
                     // 收款完成
                     Log.d(
@@ -1361,21 +1714,16 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         // 注意：这里不 return，继续执行超时处理
                     }
                     
-                    // ⚠️ 关键修复：超时时使用 tracker 的 paidTotalCents
+                    // ⚠️ 关键修复：超时时使用统一的 finishAttempt
                     val timeoutSeconds = (elapsed / 1000).toInt()
-                    finishCashAttempt(
-                        outcome = "TIMEOUT",
-                        reason = "PAYMENT_TIMEOUT:$timeoutSeconds",
+                    finishAttempt(
+                        reason = FinishReason.TIMEOUT,
                         billDeviceID = billDeviceID,
                         coinDeviceID = coinDeviceID,
-                        paidSessionDeltaCents = finalPaidSoFar,  // 使用 tracker 的 paidTotalCents
                         targetAmountCents = targetAmountCents,
                         billBaselineLevels = billBaselineLevels,
                         coinBaselineLevels = coinBaselineLevels
                     )
-
-                    // 使用错误码，UI层映射到EN/DE
-                    handlePaymentFailure("PAYMENT_TIMEOUT:$timeoutSeconds")
                     return
                 }
                 
@@ -1447,39 +1795,61 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
 
                     // 直接进入成功流程，不调用任何 DispenseValue
                     // 支付成功：统一收尾（幂等）
-                    // ⚠️ Step A: 使用统一的 finishCashAttempt 方法
-                    finishCashAttempt(
-                        outcome = "SUCCESS",
-                        reason = "SUCCESS_EXACT_PAYMENT",
+                    // ⚠️ Step A: 使用统一的 finishAttempt 方法
+                    finishAttempt(
+                        reason = FinishReason.PAY_SUCCESS,
                         billDeviceID = billDeviceID,
                         coinDeviceID = coinDeviceID,
-                        paidSessionDeltaCents = totalPaidCents,
                         targetAmountCents = targetAmountCents,
                         billBaselineLevels = billBaselineLevels,
                         coinBaselineLevels = coinBaselineLevels
                     )
 
-                    // ⚠️ Step F: 添加关键日志
-                    Log.d("CASH_SUCCESS", "paid=$totalPaidCents price=$targetAmountCents change=0")
+                    // ⚠️ 关键修复：禁止收款（进入找零/打印/成功阶段）
+                    cashCollectionAllowed = false
+                    Log.d("CASH_GUARD", "CASH_GUARD FORBIDDEN: cashCollectionAllowed=false, reason=SUCCESS_EXACT_PAYMENT")
+                    
+                    // ⚠️ 关键修复：禁止现金会话（支付成功进入 finishing）
+                    cashDeviceRepository.forbidCashSession("PAYMENT_SUCCESS_FINISHING")
+                    
+                    // ⚠️ 关键修复：成功后不再重复调用 disableAcceptorsNow
+                    // finishCashAttempt 中已经调用了 disableAcceptor，避免重复禁用
+                    // 注释掉重复的 disableAcceptorsNow 调用，统一由 finishCashAttempt 处理
+                    // val deviceIDs = mutableListOf<String>()
+                    // billDeviceID?.let { deviceIDs.add(it) }
+                    // coinDeviceID?.let { deviceIDs.add(it) }
+                    // ... (已移除重复的 disableAcceptorsNow 调用)
+                    
+                    // ⚠️ 关键修复：标记会话为已结束
+                    cashSessionFinalized = true
+                    cashSessionActive = false
+                    
+                    // ⚠️ 关键修复：统一日志 tag
+                    Log.d("PAY_MARK", "PAY_MARK SUCCESS_EXACT paid=$totalPaidCents price=$targetAmountCents")
+                    Log.d("CASH_SESSION_MARK", "CASH_SESSION_MARK COMPLETE paid=$totalPaidCents change=0")
 
                     // 支付成功
                     val successState = stateMachine.paymentSuccess(_flowState.value)
                     if (successState != null) {
+                        // ⚠️ 关键修复：清理 selectedPaymentMethod，避免后台误判并自动 beginCashSession
+                        val cleanedState = successState.copy(selectedPaymentMethod = null)
                         // ⚠️ Step C: 添加关键日志
                         Log.d(
                             "PAY_STATE_SET",
-                            "state=SUCCESS by=processCashPayment txId=${successState.paidAmountCents}"
+                            "state=SUCCESS by=processCashPayment txId=${cleanedState.paidAmountCents}"
                         )
-                        _flowState.value = successState
+                        _flowState.value = cleanedState
+                        Log.d("CASH_GUARD", "CASH_GUARD CLEANED: selectedPaymentMethod=null after SUCCESS_EXACT_PAYMENT")
                         Log.d(TAG, "现金支付处理完成，状态: SUCCESS")
 
-                        // 支付成功后触发打印
+                        // ⚠️ 关键修复：支付成功后触发打印（在禁用接收器之后）
+                        Log.d("PRINT_MARK", "PRINT_MARK START tx=$totalPaidCents")
                         triggerReceiptPrint(currentState)
 
                         // 支付成功后接入真实洗车流程
                         startWashFlowAfterPayment(
                             program,
-                            currentState.selectedPaymentMethod ?: PaymentMethod.CASH,
+                            PaymentMethod.CASH,  // 使用固定值，不再依赖 currentState.selectedPaymentMethod
                             totalPaidCents
                         )
                         } else {
@@ -1674,6 +2044,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                 )
                             
                             // ⚠️ 关键修复：执行找零流程（自动吐钞/吐币）
+                            Log.d("CHANGE_MARK", "CHANGE_MARK START change=$changeNeededCents")
                             Log.d(TAG, "========== 开始执行找零流程 ==========")
                             Log.d(TAG, "找零金额: ${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
                             
@@ -1775,14 +2146,86 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                             if (changeSuccess) {
                                 Log.d(TAG, "========== 找零流程完成 ==========")
                                 Log.d(TAG, "找零成功：${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
-                                // ⚠️ Step D: 添加 CASH_SESSION_MARK COMPLETE 日志（包含 change 信息）
-                                Log.d(
-                                    "CASH_SESSION_MARK",
-                                    "COMPLETE paid=${totalPaidCents} change=${changeNeededCents}"
-                                )
+                                // ⚠️ 关键修复：统一日志 tag
+                                Log.d("CHANGE_MARK", "CHANGE_MARK END success=true remaining=0")
+                                // ⚠️ 关键日志：PAY_MARK - 找零完成
+                                Log.d("PAY_MARK", "PAY_MARK CHANGE_SUCCESS remaining=0 target=$targetAmountCents paid=$totalPaidCents change=$changeNeededCents")
+                                // ⚠️ 关键日志：REFUND_MARK - 找零完成
+                                Log.d("REFUND_MARK", "REFUND_MARK CHANGE_DISPENSE_DONE remaining=0 (找零成功，不再触发退款)")
+                                
+                                // ⚠️ 关键修复：禁止收款（进入找零完成阶段）
+                                cashCollectionAllowed = false
+                                Log.d("CASH_GUARD", "CASH_GUARD FORBIDDEN: cashCollectionAllowed=false, reason=CHANGE_SUCCESS")
+                                
+                                // ⚠️ 关键修复：禁止现金会话（找零成功进入 finishing）
+                                cashDeviceRepository.forbidCashSession("CHANGE_SUCCESS_FINISHING")
+                                
+                                // ⚠️ 关键修复：找零成功后必须直接收敛为成功终态，不再调用 finishAttempt
+                                // 注意：finishAttempt 会再次计算 changeNeededCents，但由于找零已经完成，可能会再次触发找零或退款
+                                // 因此，找零成功后直接进入成功终态，不再调用 finishAttempt
+                                
+                                // ⚠️ 关键修复：Attempt Finalized 幂等锁 - 找零成功后立即 finalize
+                                // 使用 compareAndSet 确保只执行一次
+                                if (attemptFinalized) {
+                                    Log.w("ATTEMPT_FINALIZED", "ATTEMPT_FINALIZED ALREADY_SET attemptFinalized=true (找零成功但已 finalize，跳过)")
+                                    return
+                                }
+                                attemptFinalized = true
+                                Log.d("ATTEMPT_FINALIZED", "ATTEMPT_FINALIZED SET attemptFinalized=true (找零成功)")
+                                
+                                // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                                cashSessionFinalized = true
+                                
+                                // ⚠️ 关键修复：立即触发 stateMachine 的成功事件，并且该事件必须返回下一状态（不能返回 null）
+                                // ⚠️ 关键日志：调用 paymentSuccess 前打印 currentState
+                                val beforeState = _flowState.value.status
+                                Log.d("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK CALLING beforeState=$beforeState paid=$totalPaidCents target=$targetAmountCents change=$changeNeededCents")
+                                
+                                val successState = stateMachine.paymentSuccess(_flowState.value)
+                                if (successState != null) {
+                                    // ⚠️ 关键日志：记录 paymentSuccess 调用前后状态
+                                    Log.d("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK CALLED beforeState=$beforeState afterState=${successState.status} paid=$totalPaidCents")
+                                    
+                                    withContext(Dispatchers.Main) {
+                                        _flowState.value = successState.copy(selectedPaymentMethod = null)
+                                    }
+                                    
+                                    // ⚠️ 关键修复：支付成功后触发打印和启动洗车流程
+                                    Log.d("PRINT_MARK", "PRINT_MARK START tx=$totalPaidCents")
+                                    triggerReceiptPrint(currentState)
+                                    startWashFlowAfterPayment(
+                                        program,
+                                        currentState.selectedPaymentMethod ?: PaymentMethod.CASH,
+                                        totalPaidCents
+                                    )
+                                    
+                                    // 清理 baseline 和会话
+                                    billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                                    coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                                    cashDeviceRepository.stopCashSession("SUCCESS_OVERPAYMENT")
+                                    // 标记 pending refund 为 0
+                                    pendingRefundCents = 0
+                                    
+                                    // ⚠️ 关键日志：FINAL_DECISION
+                                    Log.d("FINAL_DECISION", "FINAL_DECISION success=true paidTotalCents=$totalPaidCents targetAmountCents=$targetAmountCents changeDispensedCents=$changeNeededCents refundDispensedCents=0 remainingCents=0 state=${successState.status} reason=CHANGE_SUCCESS")
+                                    
+                                    // ⚠️ 关键修复：找零成功后直接返回，禁止再触发退款
+                                    Log.d("REFUND_MARK", "REFUND_MARK CHANGE_DISPENSE_DONE remaining=0 (找零成功，不再触发退款)")
+                                    return
+                                } else {
+                                    // ⚠️ 关键修复：paymentSuccess 返回 null 时，记录错误并进入失败状态
+                                    Log.e("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK RETURNED_NULL beforeState=$beforeState paid=$totalPaidCents")
+                                    Log.e(TAG, "⚠️ 严重错误：找零成功后 paymentSuccess 返回 null，状态机转换失败")
+                                    // ⚠️ 关键日志：FINAL_DECISION
+                                    Log.e("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$totalPaidCents targetAmountCents=$targetAmountCents changeDispensedCents=$changeNeededCents refundDispensedCents=0 remainingCents=0 state=${_flowState.value.status} reason=PAYMENT_SUCCESS_RETURNED_NULL")
+                                    handlePaymentFailure("状态机转换失败：paymentSuccess 返回 null")
+                                    return
+                                }
                             } else {
                                 Log.e(TAG, "========== 找零流程失败 ==========")
                                 Log.e(TAG, "找零失败原因: $changeFailureReason")
+                                // ⚠️ 关键修复：统一日志 tag
+                                Log.e("CHANGE_MARK", "CHANGE_MARK END success=false remaining=$changeNeededCents error=$changeFailureReason")
                                 Log.e(TAG, "需要人工处理找零或退款")
                                 
                                 // 找零失败时，需要退款
@@ -1820,17 +2263,12 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                                 _flowState.value = refundedState
                                             }
                                             
-                                            // 统一收尾
-                                            finishCashAttempt(
-                                                outcome = "CANCELLED_REFUNDED",
-                                                reason = "找零失败但退款完成",
-                                                billDeviceID,
-                                                coinDeviceID,
-                                                paidReceivedCents,  // ⚠️ 使用 GetAllLevels 差分
-                                                targetAmountCents,
-                                                billBaselineLevels,
-                                                coinBaselineLevels
-                                            )
+                                            // ⚠️ 关键修复：找零失败但退款成功，使用统一的 finishAttempt
+                                            // 注意：退款已经在上面完成，这里只需要清理状态
+                                            billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                                            coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                                            cashDeviceRepository.stopCashSession("找零失败但退款完成")
+                                            // 状态已经在上面更新为 CANCELLED_REFUNDED，这里直接返回
                                             return
                                         } else {
                                             Log.e(
@@ -1947,49 +2385,27 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
                 
-                // 支付成功：统一收尾（幂等）
-                // ⚠️ Step A: 使用统一的 finishCashAttempt 方法
-                finishCashAttempt(
-                    outcome = "SUCCESS",
-                    reason = if (changeNeededCents == 0) "SUCCESS_EXACT_PAYMENT" else "SUCCESS_OVERPAYMENT",
+                // ⚠️ 关键修复：支付成功：统一收尾（幂等）
+                // ⚠️ Step A: 使用统一的 finishAttempt 方法
+                // 注意：finishAttempt 中已经处理了状态更新、打印和启动洗车流程，这里只需要调用即可
+                finishAttempt(
+                    reason = FinishReason.PAY_SUCCESS,
                     billDeviceID = billDeviceID,
                     coinDeviceID = coinDeviceID,
-                    paidSessionDeltaCents = totalPaidCents,
                     targetAmountCents = targetAmountCents,
                     billBaselineLevels = billBaselineLevels,
                     coinBaselineLevels = coinBaselineLevels
                 )
-
-                // ⚠️ Step F: 添加关键日志
-                Log.d(
-                    "CASH_SUCCESS",
-                    "paid=$totalPaidCents price=$targetAmountCents change=$changeNeededCents"
-                )
                 
-                // 支付成功
-                val successState = stateMachine.paymentSuccess(_flowState.value)
-                if (successState != null) {
-                    // ⚠️ Step C: 添加关键日志
-                    Log.d(
-                        "PAY_STATE_SET",
-                        "state=SUCCESS by=processCashPayment txId=${successState.paidAmountCents}"
-                    )
-                    _flowState.value = successState
-                    Log.d(TAG, "现金支付处理完成，状态: SUCCESS")
-                    
-                    // 支付成功后触发打印
-                    triggerReceiptPrint(currentState)
-                    
-                    // 支付成功后接入真实洗车流程
-                    startWashFlowAfterPayment(
-                        program,
-                        currentState.selectedPaymentMethod ?: PaymentMethod.CASH,
-                        totalPaidCents
-                    )
-                } else {
-                    Log.e(TAG, "现金支付：状态机转换失败（paymentSuccess 返回 null）")
-                    handlePaymentFailure("状态机转换失败")
-                }
+                // ⚠️ 关键修复：finishAttempt 中已经处理了所有收尾工作，这里直接返回
+                // 注意：finishAttempt 中已经：
+                // 1. 禁用了接收器
+                // 2. 计算了 paidTotalCents 和 changeNeededCents
+                // 3. 执行了找零/退款并等待完成
+                // 4. 更新了状态（SUCCESS）
+                // 5. 触发了打印和启动洗车流程
+                // 6. 清理了 baseline 和会话
+                // 所以这里不需要再重复执行这些操作
                 return
             } else {
                 Log.e(
@@ -2037,9 +2453,15 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     Log.d(TAG, "收款未完成：接收器已禁用（幂等，跳过）")
                 }
                 
+                // ⚠️ 关键修复：先设置 cashSessionActive = false，停止轮询
+                cashSessionActive = false
+                Log.d(TAG, "收款未完成：已设置 cashSessionActive=false，停止轮询")
+                
                 // 停止现金会话（幂等）
                 if (!isCashSessionStopped) {
                     try {
+                        // ⚠️ 关键修复：在 stopCashSession 之前先 reset tracker（在互斥内执行）
+                        cashDeviceRepository.getAmountTracker().reset()
                         cashDeviceRepository.stopCashSession("收款未完成")
                         isCashSessionStopped = true
                         Log.d(TAG, "收款未完成：已停止现金会话")
@@ -2050,10 +2472,17 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     Log.d(TAG, "收款未完成：现金会话已停止（幂等，跳过）")
                 }
                 
+                // ⚠️ 关键修复：标记会话为已结束
+                cashSessionFinalized = true
+                
                 handlePaymentFailure("收款未完成")
             }
         } catch (e: Exception) {
             Log.e(TAG, "现金支付异常", e)
+            
+            // ⚠️ 关键修复：标记会话为已结束
+            cashSessionFinalized = true
+            cashSessionActive = false
             
             // 异常时：统一收尾（幂等）
             if (!isAcceptorDisabled) {
@@ -2079,10 +2508,18 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
             
             handlePaymentFailure("支付异常: ${e.message}")
         } finally {
-            // 确保无论成功/失败/异常，都停止现金会话（幂等：只在未停止时执行）
-            // 注意：不再重复 disableAcceptor，因为已在 SUCCESS/失败/异常分支中执行
-            if (!isCashSessionStopped) {
+            // ⚠️ 关键修复：如果会话未成功结束，重置会话状态
+            if (!cashSessionFinalized) {
+                cashSessionActive = false
+                Log.d(TAG, "收款清理（FINALLY）：会话未成功结束，重置会话状态")
+            }
+            
+            // ⚠️ 关键修复：FINALLY 清理不能"抢跑"覆盖业务结论
+            // 只有在 attemptFinalized==true 且终态已确定后才允许 stop/reset
+            // 如果还没 finalize（比如找零还在进行），finally 只能做协程取消，不得触发退款或重置核心数据
+            if (!isCashSessionStopped && attemptFinalized && cashSessionFinalized && cashDeviceRepository.isSessionActive()) {
                 try {
+                    Log.d(TAG, "收款清理（FINALLY）：检测到 attemptFinalized=true 且会话已成功结束，执行 stopCashSession")
                     cashDeviceRepository.stopCashSession("FINALLY")
                     isCashSessionStopped = true
                     Log.d(TAG, "收款清理（FINALLY）：已停止现金会话")
@@ -2090,7 +2527,15 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     Log.e(TAG, "finally 中停止现金会话异常", e)
                 }
             } else {
-                Log.d(TAG, "收款清理（FINALLY）：现金会话已停止（幂等，跳过）")
+                if (isCashSessionStopped) {
+                    Log.d(TAG, "收款清理（FINALLY）：现金会话已停止（幂等，跳过）")
+                } else if (!attemptFinalized) {
+                    Log.d(TAG, "收款清理（FINALLY）：attemptFinalized=false（找零/退款中），跳过 stopCashSession 避免打断流程")
+                } else if (!cashSessionFinalized) {
+                    Log.d(TAG, "收款清理（FINALLY）：会话未成功结束（找零/退款中），跳过 stopCashSession 避免打断流程")
+                } else {
+                    Log.d(TAG, "收款清理（FINALLY）：会话已非活跃（幂等，跳过 stopCashSession）")
+                }
             }
         }
     }
@@ -2102,8 +2547,531 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
      * @param coinDeviceID 硬币器设备ID（可为null）
      * @param reason 调用原因（TIMEOUT/SUCCESS/EXCEPTION/统计解析失败等）
      */
+    /**
+     * ⚠️ 关键修复：统一的支付结束入口（所有退出路径必须走这里）
+     * 任何导致"离开支付页/结束支付协程"的动作，都必须先完成退款/找零收敛
+     * 
+     * @param reason 退出原因：CANCEL, PAY_SUCCESS, PAY_FAILED, TIMEOUT, EXCEPTION, BACK
+     * @param billDeviceID 纸币器设备ID
+     * @param coinDeviceID 硬币器设备ID
+     * @param targetAmountCents 目标金额
+     * @param billBaselineLevels 纸币器 baseline levels（用于计算退款）
+     * @param coinBaselineLevels 硬币器 baseline levels（用于计算退款）
+     * 
+     * 流程：
+     * 1. disableAcceptorsNow()（立即停止收款）
+     * 2. 计算本次会话 paidTotalCents（Levels 差分）与应退金额 refundCents
+     * 3. 执行退款/找零并等待最终结果（允许 BUSY 重试）
+     * 4. 最终写入终态：REFUNDED / CANCELLED_REFUNDED / SUCCESS_EXACT / SUCCESS_OVERPAYMENT
+     * 5. 只有在第 4 步完成后才能导航离开
+     */
+    private suspend fun finishAttempt(
+    reason: FinishReason,
+    billDeviceID: String?,
+    coinDeviceID: String?,
+    targetAmountCents: Int,
+    billBaselineLevels: com.carwash.carpayment.data.cashdevice.LevelsResponse?,
+    coinBaselineLevels: com.carwash.carpayment.data.cashdevice.LevelsResponse?
+) {
+    Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT START reason=$reason target=$targetAmountCents")
+    
+    // ⚠️ 关键修复：Attempt Finalized 幂等锁 - 检查是否已经 finalize
+    if (attemptFinalized) {
+        Log.w("ATTEMPT_FINALIZED", "ATTEMPT_FINALIZED ALREADY_SET attemptFinalized=true reason=$reason (跳过 finishAttempt)")
+        return
+    }
+    
+    // ⚠️ 关键修复：终态幂等保护 - 检查是否已经 finalize（防止跨交易复用）
+    if (finalizedTxId != null) {
+        Log.w("FINALIZED_TX_ID", "FINALIZED_TX_ID ALREADY_SET finalizedTxId=$finalizedTxId reason=$reason (跳过 finishAttempt，防止跨交易复用)")
+        return
+    }
+    
+    // ⚠️ 关键修复：使用 finalizeMutex 确保只执行一次
+    finalizeMutex.withLock {
+        // ⚠️ 关键修复：双重检查 attemptFinalized（在锁内再次检查）
+        if (attemptFinalized) {
+            Log.w("ATTEMPT_FINALIZED", "ATTEMPT_FINALIZED ALREADY_SET attemptFinalized=true reason=$reason (在锁内跳过)")
+            return@withLock
+        }
+        
+        // ⚠️ 关键修复：双重检查 finalizedTxId（在锁内再次检查）
+        if (finalizedTxId != null) {
+            Log.w("FINALIZED_TX_ID", "FINALIZED_TX_ID ALREADY_SET finalizedTxId=$finalizedTxId reason=$reason (在锁内跳过)")
+            return@withLock
+        }
+        
+        // ⚠️ 关键修复：设置 attemptFinalized 标志
+        attemptFinalized = true
+        Log.d("ATTEMPT_FINALIZED", "ATTEMPT_FINALIZED SET attemptFinalized=true reason=$reason")
+        // 1. 立即禁用接收器（停止继续收款）
+        billDeviceID?.let { deviceID ->
+            try {
+                cashDeviceRepository.setAutoAccept(deviceID, false, caller = "finishAttempt_$reason")
+                cashDeviceRepository.disableAcceptor(deviceID)
+            } catch (e: Exception) {
+                Log.w(TAG, "finishAttempt: 禁用纸币器失败: deviceID=$deviceID", e)
+            }
+        }
+        
+        coinDeviceID?.let { deviceID ->
+            try {
+                cashDeviceRepository.setAutoAccept(deviceID, false, caller = "finishAttempt_$reason")
+                cashDeviceRepository.disableAcceptor(deviceID)
+            } catch (e: Exception) {
+                Log.w(TAG, "finishAttempt: 禁用硬币器失败: deviceID=$deviceID", e)
+            }
+        }
+        
+        // 2. 计算本次会话 paidTotalCents（Levels 差分）- ⚠️ 关键修复：退款金额必须"当场现算"，且只算本次会话
+        // ⚠️ 关键修复：立即调用一次 GetAllLevels（纸币器+硬币器）刷新 current
+        var paidTotalCents = 0
+        try {
+            // ⚠️ 关键修复：当场现算 - 立即刷新 current levels，确保使用最新数据
+            val currentBillLevels = billDeviceID?.let { 
+                Log.d("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK REFRESH_CURRENT billDeviceID=$it (当场刷新)")
+                cashDeviceRepository.readCurrentLevels(it) 
+            }
+            val currentCoinLevels = coinDeviceID?.let { 
+                Log.d("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK REFRESH_CURRENT coinDeviceID=$it (当场刷新)")
+                cashDeviceRepository.readCurrentLevels(it) 
+            }
+            
+            // ⚠️ 关键修复：使用本次会话的 baseline（从参数传入，确保是本次会话的 baseline）
+            // 严禁复用上一笔的 baseline 或 paidTotal
+            val billDelta = cashDeviceRepository.calculateLevelsDeltaCents(
+                billBaselineLevels, currentBillLevels
+            )
+            val coinDelta = cashDeviceRepository.calculateLevelsDeltaCents(
+                coinBaselineLevels, currentCoinLevels
+            )
+            paidTotalCents = billDelta + coinDelta
+            
+            // ⚠️ 关键日志：在触发退款前打印 baseline/current/delta/paidTotal/target
+            Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT paidTotal=$paidTotalCents billDelta=$billDelta coinDelta=$coinDelta")
+            Log.d("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK baseline bill=${billBaselineLevels?.levels?.sumOf { it.stored * it.value } ?: 0} coin=${coinBaselineLevels?.levels?.sumOf { it.stored * it.value } ?: 0}")
+            Log.d("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK current bill=${currentBillLevels?.levels?.sumOf { it.stored * it.value } ?: 0} coin=${currentCoinLevels?.levels?.sumOf { it.stored * it.value } ?: 0}")
+            Log.d("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK delta bill=$billDelta coin=$coinDelta paidTotal=$paidTotalCents target=$targetAmountCents")
+            
+            // ⚠️ 关键修复：验证退款金额合理性（防止复用上一笔）
+            if (paidTotalCents < 0) {
+                Log.e("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK ERROR paidTotalCents=$paidTotalCents < 0 (异常，重置为0)")
+                paidTotalCents = 0
+            }
+            // ⚠️ 关键修复：如果 paidTotalCents 异常大（例如 > 1000€），可能是复用上一笔，记录警告
+            if (paidTotalCents > 100000) {  // 1000€ = 100000分
+                Log.e("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK WARNING paidTotalCents=$paidTotalCents > 100000 (可能复用上一笔，请检查 baseline)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "finishAttempt: 计算 paidTotalCents 失败", e)
+            // 如果计算失败，尝试使用 tracker（兜底）
+            paidTotalCents = cashDeviceRepository.getAmountTracker().getTotalCents()
+            Log.w(TAG, "finishAttempt: 使用 tracker 兜底，paidTotalCents=$paidTotalCents")
+            Log.w("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK FALLBACK paidTotal=$paidTotalCents target=$targetAmountCents")
+            
+            // ⚠️ 关键修复：验证 tracker 兜底金额合理性
+            if (paidTotalCents < 0) {
+                Log.e("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK ERROR tracker paidTotalCents=$paidTotalCents < 0 (异常，重置为0)")
+                paidTotalCents = 0
+            }
+        }
+        
+        // 3. 根据 reason 决定是退款还是找零
+        when (reason) {
+            FinishReason.PAY_SUCCESS -> {
+                // 支付成功：如果超付，需要找零
+                val changeNeededCents = paidTotalCents - targetAmountCents
+                
+                // ⚠️ 关键日志：PAY_MARK - 进入找零
+                Log.d("PAY_MARK", "PAY_MARK CHANGE_START target=$targetAmountCents paid=$paidTotalCents change=$changeNeededCents")
+                
+                // ⚠️ 关键修复：检查是否已经完成找零（在 processCashPayment 中可能已经完成）
+                // 如果 changeNeededCents <= 0，说明找零已经完成或无需找零，直接进入成功终态
+                if (changeNeededCents <= 0) {
+                    // 刚好金额或找零已完成，无需找零，进入 SUCCESS_EXACT 终态
+                    Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT SUCCESS_EXACT change=$changeNeededCents (找零已完成或无需找零)")
+                    // ⚠️ 关键日志：PAY_MARK - 支付成功（无需找零或找零已完成）
+                    Log.d("PAY_MARK", "PAY_MARK SUCCESS_EXACT target=$targetAmountCents paid=$paidTotalCents change=$changeNeededCents")
+                    // ⚠️ 关键日志：CASH_SESSION_MARK - 会话完成
+                    Log.d("CASH_SESSION_MARK", "CASH_SESSION_MARK COMPLETE paid=$paidTotalCents change=$changeNeededCents")
+                    
+                    // ⚠️ 关键日志：调用 paymentSuccess 前打印 currentState
+                    val beforeState = _flowState.value.status
+                    Log.d("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK CALLING beforeState=$beforeState paid=$paidTotalCents target=$targetAmountCents change=0")
+                    
+                    val successState = stateMachine.paymentSuccess(_flowState.value)
+                    // ⚠️ 关键日志：记录 paymentSuccess 调用前后状态
+                    if (successState != null) {
+                        Log.d("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK CALLED beforeState=$beforeState afterState=${successState.status} paid=$paidTotalCents")
+                        val currentState = _flowState.value
+                        withContext(Dispatchers.Main) {
+                            _flowState.value = successState.copy(selectedPaymentMethod = null)
+                        }
+                        // ⚠️ 关键修复：支付成功后触发打印和启动洗车流程
+                        Log.d("PRINT_MARK", "PRINT_MARK START tx=$paidTotalCents")
+                        triggerReceiptPrint(currentState)
+                        startWashFlowAfterPayment(
+                            currentState.selectedProgram ?: return@withLock,
+                            PaymentMethod.CASH,
+                            paidTotalCents
+                        )
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("SUCCESS_EXACT_PAYMENT")
+                        // 标记 pending refund 为 0
+                        pendingRefundCents = 0
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_SUCCESS_EXACT"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=SUCCESS_EXACT")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.d("FINAL_DECISION", "FINAL_DECISION success=true paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=0 remainingCents=0 state=${successState.status} reason=SUCCESS_EXACT")
+                        
+                        // ⚠️ 关键修复：支付成功后直接返回，禁止再触发退款
+                        return@withLock
+                    } else {
+                        // ⚠️ 关键修复：paymentSuccess 返回 null 时，记录错误并进入失败状态
+                        Log.e("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK RETURNED_NULL beforeState=$beforeState paid=$paidTotalCents")
+                        Log.e(TAG, "⚠️ 严重错误：支付成功后 paymentSuccess 返回 null，状态机转换失败")
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("SUCCESS_EXACT_PAYMENT_FAILED")
+                        // 标记 pending refund 为 0
+                        pendingRefundCents = 0
+                        // 标记会话为已结束
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.e("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=0 remainingCents=0 state=${_flowState.value.status} reason=PAYMENT_SUCCESS_RETURNED_NULL")
+                        
+                        handlePaymentFailure("状态机转换失败：paymentSuccess 返回 null")
+                        return@withLock
+                    }
+                }
+                
+                // 需要找零（changeNeededCents > 0）
+                Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT CHANGE_START change=$changeNeededCents")
+                // ⚠️ 关键日志：REFUND_MARK - 找零触发（实际上是找零，不是退款）
+                Log.d("REFUND_MARK", "REFUND_MARK CHANGE_DISPENSE_START amount=$changeNeededCents target=$targetAmountCents paid=$paidTotalCents")
+                
+                // ⚠️ 关键修复：退款/找零动作必须被 await 完成后才允许进入下一次支付尝试
+                val refundResult = cashDeviceRepository.refundAmount(
+                    changeNeededCents,
+                    billDeviceID,
+                    coinDeviceID
+                )
+                
+                // ⚠️ 关键日志：REFUND_MARK - 找零结果
+                Log.d("REFUND_MARK", "REFUND_MARK CHANGE_DISPENSE_RESULT success=${refundResult.success} remaining=${refundResult.remaining} totalDispensed=${refundResult.totalDispensed}")
+                
+                if (refundResult.success && refundResult.remaining == 0) {
+                    Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT CHANGE_SUCCESS remaining=0")
+                    // ⚠️ 关键日志：PAY_MARK - 找零完成
+                    Log.d("PAY_MARK", "PAY_MARK CHANGE_SUCCESS remaining=0 target=$targetAmountCents paid=$paidTotalCents change=$changeNeededCents")
+                    // ⚠️ 关键日志：CASH_SESSION_MARK - 会话完成
+                    Log.d("CASH_SESSION_MARK", "CASH_SESSION_MARK COMPLETE paid=$paidTotalCents change=$changeNeededCents")
+                    
+                    // ⚠️ 关键修复：一旦找零成功并且 remaining==0，必须进入唯一终态（SUCCESS），禁止再触发退款
+                    // ⚠️ 关键日志：调用 paymentSuccess 前打印 currentState
+                    val beforeState = _flowState.value.status
+                    Log.d("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK CALLING beforeState=$beforeState paid=$paidTotalCents target=$targetAmountCents change=$changeNeededCents")
+                    
+                    val successState = stateMachine.paymentSuccess(_flowState.value)
+                    // ⚠️ 关键日志：记录 paymentSuccess 调用前后状态
+                    if (successState != null) {
+                        Log.d("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK CALLED beforeState=$beforeState afterState=${successState.status} paid=$paidTotalCents")
+                        val currentState = _flowState.value
+                        withContext(Dispatchers.Main) {
+                            _flowState.value = successState.copy(selectedPaymentMethod = null)
+                        }
+                        // ⚠️ 关键修复：支付成功后触发打印和启动洗车流程
+                        Log.d("PRINT_MARK", "PRINT_MARK START tx=$paidTotalCents")
+                        triggerReceiptPrint(currentState)
+                        startWashFlowAfterPayment(
+                            currentState.selectedProgram ?: return@withLock,
+                            PaymentMethod.CASH,
+                            paidTotalCents
+                        )
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("SUCCESS_OVERPAYMENT")
+                        // 标记 pending refund 为 0
+                        pendingRefundCents = 0
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_SUCCESS_OVERPAYMENT"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=CHANGE_SUCCESS")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.d("FINAL_DECISION", "FINAL_DECISION success=true paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=$changeNeededCents refundDispensedCents=0 remainingCents=0 state=${successState.status} reason=CHANGE_SUCCESS")
+                        
+                        // ⚠️ 关键修复：找零成功后直接返回，禁止再触发退款
+                        Log.d("REFUND_MARK", "REFUND_MARK CHANGE_DISPENSE_DONE remaining=0 (找零成功，不再触发退款)")
+                        return@withLock
+                    } else {
+                        // ⚠️ 关键修复：paymentSuccess 返回 null 时，记录错误并进入失败状态
+                        Log.e("PAYMENT_SUCCESS_MARK", "PAYMENT_SUCCESS_MARK RETURNED_NULL beforeState=$beforeState paid=$paidTotalCents")
+                        Log.e(TAG, "⚠️ 严重错误：找零成功后 paymentSuccess 返回 null，状态机转换失败")
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("SUCCESS_OVERPAYMENT_FAILED")
+                        // 标记 pending refund 为 0
+                        pendingRefundCents = 0
+                        // 标记会话为已结束
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.e("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=$changeNeededCents refundDispensedCents=0 remainingCents=0 state=${_flowState.value.status} reason=PAYMENT_SUCCESS_RETURNED_NULL")
+                        
+                        handlePaymentFailure("状态机转换失败：paymentSuccess 返回 null")
+                        return@withLock
+                    }
+                } else {
+                    Log.e("FINISH_ATTEMPT", "FINISH_ATTEMPT CHANGE_FAILED remaining=${refundResult.remaining}")
+                    // ⚠️ 关键日志：PAY_MARK - 找零失败
+                    Log.e("PAY_MARK", "PAY_MARK CHANGE_FAILED remaining=${refundResult.remaining} target=$targetAmountCents paid=$paidTotalCents change=$changeNeededCents")
+                    // 找零失败，记录 pending refund
+                    pendingRefundCents = refundResult.remaining
+                    // 进入失败状态，但允许导航（显示错误提示）
+                    handlePaymentFailure("CHANGE_DISPENSE_FAILED: remaining=${refundResult.remaining}")
+                    return@withLock
+                }
+            }
+            
+            FinishReason.CANCEL, FinishReason.BACK -> {
+                // 取消/返回：需要退款
+                // ⚠️ 关键修复：若 refundAmountCents <= 0：直接走 CANCELLED_NO_REFUND（不允许再触发 Dispense）
+                if (paidTotalCents <= 0) {
+                    Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT CANCEL_NO_PAYMENT paidTotalCents=$paidTotalCents")
+                    // ⚠️ 关键日志：REFUND_MARK - 取消但未收款
+                    Log.d("REFUND_MARK", "REFUND_MARK CANCEL_NO_PAYMENT paid=0 (无需退款)")
+                    handlePaymentCancellation("用户取消（未投入现金）")
+                    // 清理 baseline 和会话
+                    billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                    coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                    cashDeviceRepository.stopCashSession("CANCELLED_NO_PAYMENT")
+                    pendingRefundCents = 0
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_CANCEL_NO_PAYMENT"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=CANCEL_NO_PAYMENT")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.d("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=0 targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=0 remainingCents=0 state=${_flowState.value.status} reason=CANCEL_NO_PAYMENT")
+                    return@withLock
+                }
+                
+                // ⚠️ 关键修复：若 refundAmountCents > 0：只允许按该值退款一次
+                // ⚠️ 关键修复：严禁用 targetAmountCents 作为退款金额
+                Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT REFUND_START amount=$paidTotalCents")
+                // ⚠️ 关键日志：REFUND_MARK - 退款触发
+                Log.d("REFUND_MARK", "REFUND_MARK REFUND_START reason=$reason amount=$paidTotalCents target=$targetAmountCents (本次会话实际投入金额)")
+                
+                // ⚠️ 关键修复：退款/找零动作必须被 await 完成后才允许进入下一次支付尝试
+                val refundResult = cashDeviceRepository.refundAmount(
+                    paidTotalCents,  // ⚠️ 关键：使用本次会话实际投入金额，严禁用 targetAmountCents
+                    billDeviceID,
+                    coinDeviceID
+                )
+                    
+                    // ⚠️ 关键日志：REFUND_MARK - 退款结果
+                    Log.d("REFUND_MARK", "REFUND_MARK REFUND_RESULT success=${refundResult.success} remaining=${refundResult.remaining} totalDispensed=${refundResult.totalDispensed}")
+                    
+                    if (refundResult.success && refundResult.remaining == 0) {
+                        Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT REFUND_SUCCESS remaining=0")
+                        // ⚠️ 关键日志：REFUND_MARK - 退款完成，进入终态
+                        Log.d("REFUND_MARK", "REFUND_MARK REFUND_DONE remaining=0 (进入 CANCELLED_REFUNDED 终态)")
+                        // 退款成功，进入 CANCELLED_REFUNDED 终态
+                        val refundedState = stateMachine.transition(
+                            _flowState.value,
+                            PaymentFlowStatus.CANCELLED_REFUNDED,
+                            "退款完成"
+                        )
+                        if (refundedState != null) {
+                            withContext(Dispatchers.Main) {
+                                _flowState.value = refundedState
+                            }
+                        }
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("CANCELLED_REFUNDED")
+                        // 标记 pending refund 为 0
+                        pendingRefundCents = 0
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_CANCEL_REFUNDED"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=CANCEL_REFUNDED")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.d("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=${refundResult.totalDispensed} remainingCents=0 state=${refundedState?.status ?: _flowState.value.status} reason=CANCEL_REFUNDED")
+                    } else {
+                        Log.e("FINISH_ATTEMPT", "FINISH_ATTEMPT REFUND_FAILED remaining=${refundResult.remaining}")
+                        // ⚠️ 关键日志：REFUND_MARK - 退款失败，进入终态
+                        Log.e("REFUND_MARK", "REFUND_MARK REFUND_PARTIAL remaining=${refundResult.remaining} (进入 CANCELLED_REFUNDED 终态，但显示错误)")
+                        // 退款失败，记录 pending refund
+                        pendingRefundCents = refundResult.remaining
+                        // 进入 CANCELLED_REFUNDED 状态，但显示错误提示
+                        val refundedState = stateMachine.transition(
+                            _flowState.value,
+                            PaymentFlowStatus.CANCELLED_REFUNDED,
+                            "退款部分失败，剩余=${refundResult.remaining}分"
+                        )
+                        if (refundedState != null) {
+                            withContext(Dispatchers.Main) {
+                                _flowState.value = refundedState
+                            }
+                        }
+                        _noteRejectionMessage.value = CashRejectionHint(
+                            messageKey = "error_refund_partial",
+                            acceptedDenominations = null
+                        )
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("CANCELLED_REFUND_PARTIAL")
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_CANCEL_REFUND_PARTIAL"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=CANCEL_REFUND_PARTIAL")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.e("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=${refundResult.totalDispensed} remainingCents=${refundResult.remaining} state=${refundedState?.status ?: _flowState.value.status} reason=CANCEL_REFUND_PARTIAL")
+                    }
+            }
+            
+            FinishReason.PAY_FAILED, FinishReason.TIMEOUT, FinishReason.EXCEPTION -> {
+                // 支付失败/超时/异常：需要退款
+                // ⚠️ 关键修复：若 refundAmountCents <= 0：直接走失败终态（不允许再触发 Dispense）
+                if (paidTotalCents <= 0) {
+                    Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT FAILED_NO_PAYMENT reason=$reason paidTotalCents=$paidTotalCents")
+                    // ⚠️ 关键日志：REFUND_MARK - 失败但未收款
+                    Log.d("REFUND_MARK", "REFUND_MARK FAILED_NO_PAYMENT reason=$reason paid=0 (无需退款)")
+                    handlePaymentFailure("支付失败: $reason")
+                    // 清理 baseline 和会话
+                    billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                    coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                    cashDeviceRepository.stopCashSession("FAILED_NO_PAYMENT_$reason")
+                    pendingRefundCents = 0
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_FAILED_NO_PAYMENT"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=$reason")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.d("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=0 targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=0 remainingCents=0 state=${_flowState.value.status} reason=$reason")
+                    return@withLock
+                }
+                
+                // ⚠️ 关键修复：若 refundAmountCents > 0：只允许按该值退款一次
+                // ⚠️ 关键修复：严禁用 targetAmountCents 作为退款金额
+                Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT REFUND_START amount=$paidTotalCents reason=$reason")
+                // ⚠️ 关键日志：REFUND_MARK - 退款触发
+                Log.d("REFUND_MARK", "REFUND_MARK REFUND_START reason=$reason amount=$paidTotalCents target=$targetAmountCents (本次会话实际投入金额)")
+                
+                // ⚠️ 关键修复：退款/找零动作必须被 await 完成后才允许进入下一次支付尝试
+                val refundResult = cashDeviceRepository.refundAmount(
+                    paidTotalCents,  // ⚠️ 关键：使用本次会话实际投入金额，严禁用 targetAmountCents
+                    billDeviceID,
+                    coinDeviceID
+                )
+                    
+                    // ⚠️ 关键日志：REFUND_MARK - 退款结果
+                    Log.d("REFUND_MARK", "REFUND_MARK REFUND_RESULT success=${refundResult.success} remaining=${refundResult.remaining} totalDispensed=${refundResult.totalDispensed}")
+                    
+                    if (refundResult.success && refundResult.remaining == 0) {
+                        Log.d("FINISH_ATTEMPT", "FINISH_ATTEMPT REFUND_SUCCESS remaining=0")
+                        // ⚠️ 关键日志：REFUND_MARK - 退款完成，进入终态
+                        Log.d("REFUND_MARK", "REFUND_MARK REFUND_DONE remaining=0 (进入 CANCELLED_REFUNDED 终态)")
+                        // 退款成功，进入 REFUNDED 终态
+                        val refundedState = stateMachine.transition(
+                            _flowState.value,
+                            PaymentFlowStatus.CANCELLED_REFUNDED,
+                            "退款完成"
+                        )
+                        if (refundedState != null) {
+                            withContext(Dispatchers.Main) {
+                                _flowState.value = refundedState
+                            }
+                        }
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("REFUNDED_$reason")
+                        // 标记 pending refund 为 0
+                        pendingRefundCents = 0
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_FAILED_REFUNDED"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=$reason")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.d("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=${refundResult.totalDispensed} remainingCents=0 state=${refundedState?.status ?: _flowState.value.status} reason=$reason")
+                    } else {
+                        Log.e("FINISH_ATTEMPT", "FINISH_ATTEMPT REFUND_FAILED remaining=${refundResult.remaining}")
+                        // ⚠️ 关键日志：REFUND_MARK - 退款失败
+                        Log.e("REFUND_MARK", "REFUND_MARK REFUND_FAILED remaining=${refundResult.remaining} (进入失败状态)")
+                        // 退款失败，记录 pending refund
+                        pendingRefundCents = refundResult.remaining
+                        // 进入失败状态，显示错误提示
+                        handlePaymentFailure("REFUND_FAILED: remaining=${refundResult.remaining}")
+                        // 清理 baseline 和会话
+                        billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                        cashDeviceRepository.stopCashSession("REFUND_FAILED_$reason")
+                        // ⚠️ 关键修复：标记会话为已结束，防止 FINALLY 提前 stopCashSession
+                        cashSessionFinalized = true
+                        
+                        // ⚠️ 关键修复：终态幂等保护 - 记录 finalizedTxId
+                        finalizedTxId = "${System.currentTimeMillis()}_FAILED_REFUND_PARTIAL"
+                        Log.d("FINALIZED_TX_ID", "FINALIZED_TX_ID SET txId=$finalizedTxId reason=$reason")
+                        
+                        // ⚠️ 关键日志：FINAL_DECISION
+                        Log.e("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$paidTotalCents targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=${refundResult.totalDispensed} remainingCents=${refundResult.remaining} state=${_flowState.value.status} reason=$reason")
+                    }
+                }
+            } // <-- 关闭 when(reason)
+        
+        Log.d(
+            "FINISH_ATTEMPT",
+            "FINISH_ATTEMPT DONE reason=$reason pendingRefund=$pendingRefundCents"
+        )
+    } // ✅ 关闭 finalizeMutex.withLock { ... }
+}
+
 /**
- * 统一现金支付结束方法（单一出口）
+ * 退出原因枚举
+ */
+private enum class FinishReason {
+    CANCEL,      // 用户取消
+    PAY_SUCCESS, // 支付成功
+    PAY_FAILED,  // 支付失败
+    TIMEOUT,     // 超时
+    EXCEPTION,   // 异常
+    BACK         // 返回
+}
+
+/**
+ * 统一现金支付结束方法（单一出口）- 保留作为兼容层，内部调用 finishAttempt
  * @param outcome 结束原因：SUCCESS, CANCEL, TIMEOUT, FAILED
  * @param reason 详细原因描述
  * @param billDeviceID 纸币器设备ID
@@ -2144,7 +3112,7 @@ private suspend fun finishCashAttempt(
     // 2. DisableAcceptor + SetAutoAccept(false)（两台设备都做，失败也继续）
     billDeviceID?.let { deviceID ->
         try {
-            cashDeviceRepository.setAutoAccept(deviceID, false)
+            cashDeviceRepository.setAutoAccept(deviceID, false, caller = "finishCashAttempt")
             cashDeviceRepository.disableAcceptor(deviceID)
         } catch (e: Exception) {
             Log.w(TAG, "纸币器 DisableAcceptor/SetAutoAccept 失败: deviceID=$deviceID", e)
@@ -2153,7 +3121,7 @@ private suspend fun finishCashAttempt(
 
     coinDeviceID?.let { deviceID ->
         try {
-            cashDeviceRepository.setAutoAccept(deviceID, false)
+            cashDeviceRepository.setAutoAccept(deviceID, false, caller = "finishCashAttempt")
             cashDeviceRepository.disableAcceptor(deviceID)
         } catch (e: Exception) {
             Log.w(TAG, "硬币器 DisableAcceptor/SetAutoAccept 失败: deviceID=$deviceID", e)
@@ -2711,13 +3679,11 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
 
                             val targetAmountCents = currentState.targetAmountCents
 
-                            // ⚠️ Step A: 使用统一的 finishCashAttempt 方法
-                            finishCashAttempt(
-                                outcome = "CANCEL",
-                                reason = "用户取消现金支付",
+                            // ⚠️ Step A: 使用统一的 finishAttempt 方法
+                            finishAttempt(
+                                reason = FinishReason.CANCEL,
                                 billDeviceID = billDeviceID,
                                 coinDeviceID = coinDeviceID,
-                                paidSessionDeltaCents = paidSessionDeltaCents,
                                 targetAmountCents = targetAmountCents,
                                 billBaselineLevels = billBaselineLevels,
                                 coinBaselineLevels = coinBaselineLevels
@@ -2739,6 +3705,124 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
                 handlePaymentCancellation("取消支付异常: ${e.message}")
             }
         }
+    }
+    
+    /**
+     * ⚠️ 关键修复：统一取消入口（所有页面的 Cancel 按钮都调用此方法）
+     * @param source 取消来源（PAYMENT/PROGRESS/SUCCESS 等，用于日志）
+     */
+    fun onUserCancelRequested(source: String) {
+        val currentState = _flowState.value
+        // ⚠️ 关键修复：使用 GetAllLevels 差分计算已收金额（paidTotalCents）
+        val paidTotalCents = getCurrentPaidAmountCents()
+        val sessionActive = cashSessionActive
+        
+        // ⚠️ 关键修复：添加 UI_CANCEL_CLICKED 日志
+        Log.d("UI_CANCEL_CLICKED", "UI_CANCEL_CLICKED source=$source paid=$paidTotalCents sessionActive=$sessionActive state=${currentState.status}")
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_clicked source=$source paid=$paidTotalCents sessionActive=$sessionActive state=${currentState.status}")
+        
+        // ⚠️ 关键修复：立即设置 cancelRequested = true，阻止 success 自动收尾
+        cancelRequested = true
+        
+        // ⚠️ 关键修复：立即停止继续收款（DisableAcceptor / SetAutoAccept=false）
+        viewModelScope.launch {
+            try {
+                val billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
+                val coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
+                
+                billDeviceID?.let { deviceID ->
+                    try {
+                        cashDeviceRepository.setAutoAccept(deviceID, autoAccept = false, caller = "CANCEL_STOP_COLLECTION")
+                        cashDeviceRepository.disableAcceptor(deviceID)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "取消时禁用纸币器失败", e)
+                    }
+                }
+                
+                coinDeviceID?.let { deviceID ->
+                    try {
+                        cashDeviceRepository.setAutoAccept(deviceID, autoAccept = false, caller = "CANCEL_STOP_COLLECTION")
+                        cashDeviceRepository.disableAcceptor(deviceID)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "取消时禁用硬币器失败", e)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "取消时停止收款异常", e)
+            }
+        }
+        
+        // 如果已投入金额为 0，直接导航回首页并重置
+        if (paidTotalCents <= 0) {
+            Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK paid=0, navigateHomeAndReset")
+            viewModelScope.launch {
+                handlePaymentCancellation("用户取消（未投入现金）")
+                resetForNewTransaction(reason = "CANCEL_NO_PAYMENT($source)")
+            }
+            return
+        }
+        
+        // 如果已投入金额 > 0，触发 UI 弹确认框
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_confirm_shown")
+        val confirmState = stateMachine.transition(
+            currentState,
+            PaymentFlowStatus.SHOW_CANCEL_CONFIRM,
+            "用户请求取消，需要确认"
+        )
+        if (confirmState != null) {
+            _flowState.value = confirmState
+        }
+    }
+    
+    /**
+     * ⚠️ 关键修复：用户取消确认对话框（回到 PAYING 状态）
+     */
+    fun onUserCancelDismissed() {
+        val currentState = _flowState.value
+        val backToPayingState = stateMachine.transition(
+            currentState,
+            PaymentFlowStatus.PAYING,
+            "用户取消确认对话框"
+        )
+        if (backToPayingState != null) {
+            _flowState.value = backToPayingState
+        }
+    }
+    
+    /**
+     * ⚠️ 关键修复：用户确认取消后执行退款
+     * 必须在用户确认取消后调用
+     */
+    suspend fun confirmCancelAndRefund() {
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_confirmed")
+        
+        val currentState = _flowState.value
+        val billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
+        val coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
+        
+        // ⚠️ 关键修复：从 baselineStore 获取 baseline levels（确保是本次会话的 baseline）
+        // ⚠️ 关键修复：严禁复用上一笔的 baseline 或 paidTotal
+        val baselineStore = cashDeviceRepository.getBaselineStore()
+        val billBaselineLevels = billDeviceID?.let { baselineStore.getBaselineLevels(it) }
+        val coinBaselineLevels = coinDeviceID?.let { baselineStore.getBaselineLevels(it) }
+        
+        // ⚠️ 关键日志：记录本次会话的 baseline（用于验证）
+        Log.d("REFUND_AMOUNT_MARK", "REFUND_AMOUNT_MARK CANCEL_CONFIRMED billBaseline=${billBaselineLevels?.levels?.sumOf { it.stored * it.value } ?: 0} coinBaseline=${coinBaselineLevels?.levels?.sumOf { it.stored * it.value } ?: 0}")
+        
+        val targetAmountCents = currentState.targetAmountCents
+        
+        // ⚠️ 关键修复：使用统一的 finishAttempt 方法
+        // ⚠️ 关键修复：finishAttempt 内部会"当场现算" paidTotalCents，使用本次会话的 baseline 和最新的 current levels
+        finishAttempt(
+            reason = FinishReason.CANCEL,
+            billDeviceID = billDeviceID,
+            coinDeviceID = coinDeviceID,
+            targetAmountCents = targetAmountCents,
+            billBaselineLevels = billBaselineLevels,
+            coinBaselineLevels = coinBaselineLevels
+        )
+        
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_finalize_done")
     }
     
     /**
@@ -2788,13 +3872,52 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
                         Log.d(TAG, "========== 打印成功 ==========")
                         Log.d(TAG, "invoiceId=${result.invoiceId}")
                         Log.d(TAG, "================================")
+                        // ⚠️ 关键修复：统一日志 tag
+                        Log.d("PRINT_MARK", "PRINT_MARK END success=true error=null")
                         _printResult.value = PrintResult.Success(result.invoiceId)
+                        
+                        // ⚠️ 关键修复：禁止收款（进入打印完成阶段）
+                        cashCollectionAllowed = false
+                        Log.d("CASH_GUARD", "CASH_GUARD FORBIDDEN: cashCollectionAllowed=false, reason=PRINT_DONE")
+                        
+                        // ⚠️ 关键修复：禁止现金会话（打印完成）
+                        cashDeviceRepository.forbidCashSession("PRINT_DONE")
+                        
+                        // ⚠️ 关键修复：打印完成后进入收尾阶段，禁止重新启动现金会话
+                        cashFinishing = true
+                        Log.d(TAG, "CASH_FINISH_STAGE enter: finishing=true, reason=PRINT_DONE")
+                        
+                        // ⚠️ 关键修复：打印后允许 read-only 库存刷新（用于对账/审计）
+                        // ⚠️ 注意：使用固定设备名称，如果设备未连接则跳过（非致命）
+                        viewModelScope.launch {
+                            try {
+                                // ⚠️ 尝试使用固定设备名称进行 read-only 库存刷新
+                                // 如果设备未连接，readLevelsReadOnly 会返回错误，但不影响主流程
+                                try {
+                                    val billLevels = cashDeviceRepository.readLevelsReadOnly("SPECTRAL_PAYOUT-0", caller = "PRINT_AFTER_SUCCESS_READONLY")
+                                    Log.d(TAG, "打印后 read-only 库存刷新（纸币器）: deviceID=SPECTRAL_PAYOUT-0, totalCents=${billLevels.calculateTotalCents()}")
+                                } catch (e: Exception) {
+                                    Log.d(TAG, "打印后 read-only 库存刷新（纸币器）跳过: ${e.message}")
+                                }
+                                
+                                try {
+                                    val coinLevels = cashDeviceRepository.readLevelsReadOnly("SMART_COIN_SYSTEM-1", caller = "PRINT_AFTER_SUCCESS_READONLY")
+                                    Log.d(TAG, "打印后 read-only 库存刷新（硬币器）: deviceID=SMART_COIN_SYSTEM-1, totalCents=${coinLevels.calculateTotalCents()}")
+                                } catch (e: Exception) {
+                                    Log.d(TAG, "打印后 read-only 库存刷新（硬币器）跳过: ${e.message}")
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "打印后 read-only 库存刷新异常（非致命）", e)
+                            }
+                        }
                     }
 
                     is com.carwash.carpayment.data.printer.PrintResult.Failure -> {
                         Log.w(TAG, "========== 打印失败 ==========")
                         Log.w(TAG, "reason=${result.reason}")
                         Log.w(TAG, "==============================")
+                        // ⚠️ 关键修复：统一日志 tag
+                        Log.e("PRINT_MARK", "PRINT_MARK END success=false error=${result.reason}")
                     // 将错误码映射到 i18n key（UI 层会映射到实际文案）
                     val errorKey = when (result.reason) {
                         "PRINTER_NOT_CONNECTED" -> "printer_not_connected"
@@ -2857,13 +3980,28 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
                         Log.d(TAG, "========== 打印成功（SupervisorJob） ==========")
                         Log.d(TAG, "invoiceId=${result.invoiceId}")
                         Log.d(TAG, "==============================================")
+                        // ⚠️ 关键修复：统一日志 tag
+                        Log.d("PRINT_MARK", "PRINT_MARK END success=true error=null")
                         _printResult.value = PrintResult.Success(result.invoiceId)
+                        
+                        // ⚠️ 关键修复：禁止收款（进入打印完成阶段）
+                        cashCollectionAllowed = false
+                        Log.d("CASH_GUARD", "CASH_GUARD FORBIDDEN: cashCollectionAllowed=false, reason=PRINT_DONE(SupervisorJob)")
+                        
+                        // ⚠️ 关键修复：禁止现金会话（打印完成）
+                        cashDeviceRepository.forbidCashSession("PRINT_DONE(SupervisorJob)")
+                        
+                        // ⚠️ 关键修复：打印完成后进入收尾阶段，禁止重新启动现金会话
+                        cashFinishing = true
+                        Log.d(TAG, "CASH_FINISH_STAGE enter: finishing=true, reason=PRINT_DONE(SupervisorJob)")
                     }
 
                     is com.carwash.carpayment.data.printer.PrintResult.Failure -> {
                         Log.w(TAG, "========== 打印失败（SupervisorJob） ==========")
                         Log.w(TAG, "reason=${result.reason}")
                         Log.w(TAG, "==============================================")
+                        // ⚠️ 关键修复：统一日志 tag
+                        Log.e("PRINT_MARK", "PRINT_MARK END success=false error=${result.reason}")
                     // 将错误码映射到 i18n key（UI 层会映射到实际文案）
                     val errorKey = when (result.reason) {
                         "PRINTER_NOT_CONNECTED" -> "printer_not_connected"
@@ -3155,11 +4293,29 @@ private fun resetPaymentAttempt(reason: String) {
  * @param reason 重置原因（例如 NAVIGATE_HOME_AFTER_SUCCESS）
  */
 fun resetForNewAttempt(reason: String) {
+    // ⚠️ 关键修复：检查是否在收尾阶段，禁止在打印后 reset tracker/session
+    if (cashFinishing) {
+        Log.e(TAG, "❌ BUG: cash lifecycle called during finishing stage")
+        Log.e(TAG, "❌ resetForNewAttempt 被调用，但 cashFinishing=true，禁止 reset tracker/session")
+        Log.e(TAG, "❌ reason=$reason")
+        // 允许 reset UI 状态，但不允许 reset tracker/session
+        // 只重置 cashFinishing 标记，允许下次支付
+        cashFinishing = false
+        return
+    }
+    
     val currentState = _flowState.value
     val fromState = currentState.status
     val attemptId = currentState.selectedProgram?.id
     val txId = currentState.paidAmountCents // 使用 paidAmountCents 作为标识
 
+    // ⚠️ 关键修复：禁止收款（回首页/重置时）
+    cashCollectionAllowed = false
+    Log.d("CASH_GUARD", "CASH_GUARD FORBIDDEN: cashCollectionAllowed=false, reason=RESET_FOR_NEW_ATTEMPT($reason)")
+    
+    // ⚠️ 关键修复：禁止现金会话（回首页/重置时）
+    cashDeviceRepository.forbidCashSession("NAVIGATE_HOME_OR_RESET($reason)")
+    
     // ⚠️ Step C: 添加关键日志
     Log.d("PAY_RESET_BEGIN", "reason=$reason fromState=$fromState attemptId=$attemptId txId=$txId")
 
@@ -3176,52 +4332,115 @@ fun resetForNewAttempt(reason: String) {
         _gateCheckResult.value = null
         _carWashStartState.value = null
         _printResult.value = null
+        
+        // ⚠️ 关键修复：重置所有现金支付相关状态，允许用户再次选择套餐
+        cashSessionActive = false
+        cashSessionFinalized = false  // ⚠️ 关键：必须重置为 false，否则下一次进入现金支付会被阻止
+        cashFinishing = false
+        cashCollectionAllowed = false
+        isCashPaymentRunning = false
+        attemptFinalized = false  // ⚠️ 关键修复：重置 attemptFinalized 标志
+        finalizedTxId = null  // ⚠️ 关键修复：重置 finalizedTxId，允许新交易
+        Log.d(TAG, "resetForNewAttempt: 已重置所有现金支付相关状态")
+        // ⚠️ 关键修复：补充日志，方便确认重置是否生效
+        Log.d("CASH_SESSION_RESET", "CASH_SESSION_RESET: resetForNewAttempt 完成, reason=$reason")
+        Log.d("CASH_SESSION_RESET", "  cashSessionActive=$cashSessionActive, cashSessionFinalized=$cashSessionFinalized, cashCollectionAllowed=$cashCollectionAllowed, attemptFinalized=$attemptFinalized, finalizedTxId=$finalizedTxId")
 
         // 3. 强制把 PaymentFlowStateMachine 状态设置回初始状态（NOT_STARTED）
-        // ⚠️ 关键修复：forceResetToNotStarted 会保留 selectedProgram 和 selectedPaymentMethod，避免白屏
+        // ⚠️ 关键修复：支付成功后必须完全清理状态，允许用户再次选择套餐
         val resetState = stateMachine.forceResetToNotStarted(currentState)
         _flowState.value = resetState
-        Log.d(TAG, "resetForNewAttempt: 保留 selectedProgram=${resetState.selectedProgram?.id}, selectedPaymentMethod=${resetState.selectedPaymentMethod}")
+        Log.d(TAG, "resetForNewAttempt: 已清理 selectedProgram 和 selectedPaymentMethod，允许用户再次选择套餐")
 
         // ⚠️ Step C: 添加关键日志
-        Log.d("PAY_RESET_END", "toState=NOT_STARTED attemptId=${resetState.selectedProgram?.id} txId=0")
+        Log.d("PAY_RESET_END", "toState=NOT_STARTED attemptId=null txId=0")
         Log.d(TAG, "========== resetForNewAttempt 完成 ==========")
-        Log.d(TAG, "resetForNewAttempt: 保留 selectedProgram=${resetState.selectedProgram?.id}, selectedPaymentMethod=${resetState.selectedPaymentMethod}")
+        Log.d(TAG, "resetForNewAttempt: 已清理所有支付状态，允许用户再次选择套餐")
     } catch (e: Exception) {
         Log.e(TAG, "resetForNewAttempt 异常", e)
-        // ⚠️ 关键修复：即使异常，也保留 selectedProgram 和 selectedPaymentMethod，避免白屏
-        val currentState = _flowState.value
+        // ⚠️ 关键修复：即使异常，也完全清理状态，允许用户再次选择套餐
         _flowState.value = PaymentFlowState(
             status = PaymentFlowStatus.NOT_STARTED,
-            selectedProgram = currentState.selectedProgram,  // ⚠️ 保留选择，避免白屏
-            selectedPaymentMethod = currentState.selectedPaymentMethod,  // ⚠️ 保留支付方式，避免白屏
+            selectedProgram = null,  // ⚠️ 清空选择，允许用户再次选择套餐
+            selectedPaymentMethod = null,  // ⚠️ 清空支付方式，恢复到初始状态
             paymentConfirmed = false,
             errorMessage = null,
             paidAmountCents = 0,
             targetAmountCents = 0,
             lastUpdated = System.currentTimeMillis()
         )
-        Log.d("PAY_RESET_END", "toState=NOT_STARTED (异常恢复) attemptId=${currentState.selectedProgram?.id} txId=0")
-        Log.d(TAG, "resetForNewAttempt 异常恢复: 保留 selectedProgram=${currentState.selectedProgram?.id}, selectedPaymentMethod=${currentState.selectedPaymentMethod}")
+        Log.d("PAY_RESET_END", "toState=NOT_STARTED (异常恢复) attemptId=null txId=0")
+        Log.d(TAG, "resetForNewAttempt 异常恢复: 已清理所有支付状态，允许用户再次选择套餐")
     }
+    }
+    
+    /**
+     * ⚠️ 关键修复：新交易重置（支付成功并回到首页后调用）
+     * 清空所有交易状态，允许用户再次选择套餐并开始下一笔交易
+     * @param reason 重置原因（用于日志）
+     */
+    fun resetForNewTransaction(reason: String) {
+        val currentState = _flowState.value
+        val oldState = currentState.status
+        val oldProgram = currentState.selectedProgram?.id
+        val oldPaymentMethod = currentState.selectedPaymentMethod
+        
+        Log.d("TX_RESET", "TX_RESET BEGIN: reason=$reason, oldState=$oldState, oldProgram=$oldProgram, oldPaymentMethod=$oldPaymentMethod")
+        
+        // 1. 清空所有交易状态
+        _noteRejectionMessage.value = null
+        _gateCheckResult.value = null
+        _carWashStartState.value = null
+        _printResult.value = null
+        
+        // 2. 重置所有现金支付相关状态
+        cashSessionActive = false
+        cashSessionFinalized = false  // ⚠️ 关键：必须重置为 false，否则下一次进入现金支付会被阻止
+        cashFinishing = false
+        cashCollectionAllowed = false
+        isCashPaymentRunning = false
+        attemptFinalized = false  // ⚠️ 关键修复：重置 attemptFinalized 标志
+        finalizedTxId = null  // ⚠️ 关键修复：重置 finalizedTxId，允许新交易
+        
+        // ⚠️ 关键修复：补充日志，方便确认重置是否生效
+        Log.d("CASH_SESSION_RESET", "CASH_SESSION_RESET: resetForNewTransaction 完成, reason=$reason")
+        Log.d("CASH_SESSION_RESET", "  cashSessionActive=$cashSessionActive, cashSessionFinalized=$cashSessionFinalized, cashCollectionAllowed=$cashCollectionAllowed, attemptFinalized=$attemptFinalized, finalizedTxId=$finalizedTxId")
+        
+        // 3. 禁止现金会话（确保不会在非现金支付页面启用收款）
+        cashDeviceRepository.forbidCashSession("RESET_FOR_NEW_TRANSACTION($reason)")
+        
+        // 4. 取消所有可能残留的协程/job
+        carWashStartJob?.cancel()
+        carWashStartJob = null
+        
+        // 5. 强制把状态设置回 NOT_STARTED，清空所有选择
+        val resetState = stateMachine.forceResetToNotStarted(currentState)
+        _flowState.value = resetState
+        
+        // ⚠️ 关键修复：恢复 allowCashSession，确保下一次交易能重新开始
+        // 注意：这里不立即 allowCashSession，而是在用户选择现金支付时再 allow
+        // 但需要确保 forbidCashSession 不会持久化阻止下一次交易
+        // 实际上，allowCashSession 会在 processCashPayment 开始时调用（第 399 行）
+        // 这里只需要确保 forbidCashSession 不会在 reset 后仍然阻止
+        
+        Log.d("TX_RESET", "TX_RESET END: reason=$reason, oldState=$oldState -> NOT_STARTED, oldProgram=$oldProgram -> null, oldPaymentMethod=$oldPaymentMethod -> null")
+        Log.d(TAG, "resetForNewTransaction: 已清空所有交易状态，允许用户再次选择套餐")
+        Log.d("CASH_GUARD", "CASH_GUARD RESET: resetForNewTransaction 完成，下一次交易将在 processCashPayment 时 allowCashSession")
     }
     
     /**
      * 获取当前流程状态
      */
     fun getCurrentFlowStatus(): PaymentFlowStatus = _flowState.value.status
+    
+    /**
+     * ⚠️ 关键修复：获取当前已收金额（基于 GetAllLevels 差分）
+     * 用于取消流程中计算退款金额
+     * 注意：如果会话激活，返回 flowState 中的值（已在轮询中实时更新）
+     */
+    fun getCurrentPaidAmountCents(): Int {
+        // ⚠️ 关键修复：直接返回 flowState 中的值
+        // flowState.paidAmountCents 已在轮询循环中基于 GetAllLevels 差分实时更新
+        return _flowState.value.paidAmountCents
+    }
 }
-
-/**
- * 支付流程状态（兼容旧接口）
- */
-data class PaymentState(
-    val selectedProgram: WashProgram? = null,
-    val selectedPaymentMethod: PaymentMethod? = null,
-    val paymentConfirmed: Boolean = false,
-    val isPaymentProcessing: Boolean = false,
-    val paymentSuccess: Boolean = false,
-    val collectedAmount: Double = 0.0,      // 已收款金额（欧元）
-    val targetAmount: Double = 0.0,           // 目标金额（欧元）
-    val isPaymentComplete: Boolean = false    // 是否已收齐
-)

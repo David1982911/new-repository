@@ -122,6 +122,13 @@
     
     <!-- 现金支付 -->
     <string name="cancel_payment">Zahlung abbrechen</string>
+    
+    <!-- Cancel Payment Confirmation Dialog -->
+    <string name="cancel_payment_title">Zahlung abbrechen?</string>
+    <string name="cancel_payment_body">Wenn Sie jetzt abbrechen, erstatten wir das eingezahlte Geld.</string>
+    <string name="cancel_payment_continue">Weiter bezahlen</string>
+    <string name="cancel_payment_confirm">Abbrechen &amp; erstatten</string>
+    
     <string name="cash_insert_hint">Bitte kleine Scheine/Münzen einwerfen: %1$s</string>
     <string name="cash_cannot_accept_large">Scheine/Münzen %1$s können nicht akzeptiert werden, da Wechselgeld nicht ausreicht</string>
     <string name="cash_total_inserted">Gesamt eingeworfen: %1$s</string>
@@ -130,6 +137,8 @@
     <string name="cash_refunding">Rückerstattung wird bearbeitet...</string>
     <string name="cash_refund_success">Rückerstattung erfolgreich</string>
     <string name="cash_refund_failed">Rückerstattung fehlgeschlagen: %1$s</string>
+    <string name="error_pending_refund">上一笔退款尚未完成（剩余 %1$s），正在处理/请稍候</string>
+    <string name="error_refund_partial">退款部分失败，剩余 %1$s。请联系工作人员</string>
     
     <!-- 打印机 -->
     <string name="printer_print_failed">Druck fehlgeschlagen: %1$s</string>

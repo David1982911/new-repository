@@ -145,12 +145,14 @@ fun PaymentNavigation(
                         // 等待3秒后返回主界面（给用户看到成功提示的时间）
                         kotlinx.coroutines.delay(3000)
                         android.util.Log.d("PaymentNavigation", "返回主界面")
-                        // ⚠️ Step A: 在返回主界面时强制 reset 支付状态
-                        paymentViewModel.resetForNewAttempt(reason = "NAVIGATE_HOME_AFTER_SUCCESS")
-                        // 先导航离开支付页，再清空选择（避免白屏）
+                        // ⚠️ 关键修复：在返回主界面时调用新交易重置，清空所有状态
+                        paymentViewModel.resetForNewTransaction(reason = "AFTER_SUCCESS_RETURN_HOME")
+                        // ⚠️ 关键修复：清空选择的套餐，允许用户再次选择
+                        homeViewModel.resetSelectedProgram()
+                        // 先导航离开支付页
                         navController.popBackStack(Screen.SelectProgram.route, inclusive = false)
-                        // 清空选择在 Home 页恢复/进入时做，不在支付页清空
-                        homeViewModel.resumePolling() // 恢复首页轮询
+                        // 恢复首页轮询
+                        homeViewModel.resumePolling()
                     }
                     PaymentFlowStatus.CANCELLED -> {
                         android.util.Log.d("PaymentNavigation", "支付已取消，立即返回主界面")
@@ -159,6 +161,21 @@ fun PaymentNavigation(
                         homeViewModel.resetSelectedProgram()
                         homeViewModel.resumePolling() // 恢复首页轮询
                         navController.popBackStack(Screen.SelectProgram.route, inclusive = false)
+                    }
+                    PaymentFlowStatus.CANCELLED_REFUNDED -> {
+                        // ⚠️ 关键修复：退款完成后才允许导航回首页（确定行为）
+                        android.util.Log.d("PaymentNavigation", "支付已取消且退款完成，返回主界面")
+                        android.util.Log.d("REFUND_DONE", "REFUND_DONE: 退款完成，允许导航回首页")
+                        // 退款完成后返回主界面并重置状态
+                        paymentViewModel.resetForNewTransaction(reason = "CANCEL_REFUNDED_RETURN_HOME")
+                        homeViewModel.resetSelectedProgram()
+                        homeViewModel.resumePolling() // 恢复首页轮询
+                        navController.popBackStack(Screen.SelectProgram.route, inclusive = false)
+                    }
+                    PaymentFlowStatus.CANCELLED_REFUNDING -> {
+                        // ⚠️ 关键修复：退款中，不允许导航回首页（必须等待退款完成）
+                        android.util.Log.d("PaymentNavigation", "退款中，等待退款完成...")
+                        // 不执行任何导航操作，等待状态变为 CANCELLED_REFUNDED
                     }
                     PaymentFlowStatus.FAILED -> {
                         android.util.Log.d("PaymentNavigation", "支付失败，保持在支付页面")

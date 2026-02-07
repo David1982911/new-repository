@@ -74,6 +74,15 @@
     <string name="cash_refunding">Processing refund...</string>
     <string name="cash_refund_success">Refund successful</string>
     <string name="cash_refund_failed">Refund failed: %1$s</string>
+    <string name="error_pending_refund">Previous refund not completed (remaining %1$s), processing/please wait</string>
+    <string name="error_refund_partial">Refund partially failed, remaining %1$s. Please contact staff.</string>
+    
+    <!-- Cancel Payment Confirmation Dialog -->
+    <string name="cancel_payment_title">Cancel payment?</string>
+    <string name="cancel_payment_body">If you cancel now, we will return the money you inserted.</string>
+    <string name="cancel_payment_continue">Continue paying</string>
+    <string name="cancel_payment_confirm">Cancel &amp; Refund</string>
+    
     <string name="cash_paid_amount">Paid: %1$s</string>
     <string name="cash_remaining_amount">Remaining: %1$s</string>
     <string name="cash_change_amount">Expected change: %1$s</string>

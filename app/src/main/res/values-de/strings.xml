@@ -62,6 +62,15 @@
     <string name="cash_refunding">Rückerstattung wird bearbeitet...</string>
     <string name="cash_refund_success">Rückerstattung erfolgreich</string>
     <string name="cash_refund_failed">Rückerstattung fehlgeschlagen: %1$s</string>
+    <string name="error_pending_refund">Vorherige Rückerstattung nicht abgeschlossen (verbleibend %1$s), wird bearbeitet/bitte warten</string>
+    <string name="error_refund_partial">Rückerstattung teilweise fehlgeschlagen, verbleibend %1$s. Bitte Personal kontaktieren.</string>
+    
+    <!-- Cancel Payment Confirmation Dialog -->
+    <string name="cancel_payment_title">Zahlung abbrechen?</string>
+    <string name="cancel_payment_body">Wenn Sie jetzt abbrechen, erstatten wir das eingezahlte Geld.</string>
+    <string name="cancel_payment_continue">Weiter bezahlen</string>
+    <string name="cancel_payment_confirm">Abbrechen &amp; erstatten</string>
+    
     <string name="cash_target">Ziel: %1$s</string>
     <string name="cash_paid">Bezahlt: %1$s</string>
     <string name="cash_remaining">Verbleibend: %1$s</string>
