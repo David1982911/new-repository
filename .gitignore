@@ -27,6 +27,13 @@ captures/
 *.apk
 output-metadata.json
 
+# IntelliJ
+*.iml
+.idea/
+misc.xml
+deploymentTargetDropDown.xml
+render.experimental.xml
+
 # Keystore files
 *.jks
 *.keystore
