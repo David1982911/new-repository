@@ -343,7 +343,8 @@ fun SelectPaymentScreen(
                 Button(
                     onClick = {
                         Log.d("SelectPaymentScreen", "取消支付")
-                        viewModel.cancelPayment()
+                        // ⚠️ 关键修复：统一使用 onUserCancelRequested 显示弹框
+                        viewModel.onUserCancelRequested(source = "CANCEL_PAYMENT_BUTTON")
                     },
                     modifier = Modifier
                         .fillMaxWidth()

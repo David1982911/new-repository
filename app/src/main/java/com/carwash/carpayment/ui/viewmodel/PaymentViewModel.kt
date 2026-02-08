@@ -1136,9 +1136,15 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
             // ⚠️ 关键修复：轮询间隔设置为 300~500ms，确保 SPECTRAL_PAYOUT-0 的 GetAllLevels 差分作为 paidTotalCents 的唯一来源
             val POLL_INTERVAL_MS = 400L  // 轮询间隔：400ms（在 300~500ms 范围内）
             
-            while (currentCoroutineContext().isActive) {
+            while (currentCoroutineContext().isActive && !attemptFinalized) {
                 // ⚠️ 关键修复：轮询间隔控制
                 kotlinx.coroutines.delay(POLL_INTERVAL_MS)
+                
+                // ⚠️ 关键修复：如果 attemptFinalized 为 true，退出循环（用户确认取消后）
+                if (attemptFinalized) {
+                    Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK attemptFinalized=true, exiting polling loop")
+                    break
+                }
                 
                 // ⚠️ 关键修复：在 while 循环开始处声明 tracker，避免重复声明冲突
                 val tracker = cashDeviceRepository.getAmountTracker()
@@ -1625,13 +1631,25 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
 
                 // ⚠️ 关键修复：支付成功判定必须基于 paidSessionDeltaCents（GetAllLevels 差分）
                 // ⚠️ 统一使用 paidTotalCents（= paidSessionDeltaCents）作为判定用金额
-                // ⚠️ 关键修复：Cancel 优先级高于自动成功判定
-                if (cancelRequested) {
-                    Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancelRequested=true, skip success check")
-                    break
+                // ⚠️ 关键修复：在 SHOW_CANCEL_CONFIRM 状态下，继续轮询但不触发成功判定
+                val currentFlowState = _flowState.value
+                val isCancelConfirmDialogShowing = currentFlowState.status == PaymentFlowStatus.SHOW_CANCEL_CONFIRM
+                
+                // ⚠️ 关键修复：如果弹框显示但 cancelRequested 被意外重置，重新设置
+                if (isCancelConfirmDialogShowing && !cancelRequested) {
+                    Log.w("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK WARNING: Dialog showing but cancelRequested=false, re-setting to true")
+                    cancelRequested = true
                 }
                 
-                if (paidTotalCents >= targetAmountCents) {
+                if (cancelRequested || isCancelConfirmDialogShowing) {
+                    Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancelRequested=$cancelRequested isCancelConfirmDialogShowing=$isCancelConfirmDialogShowing, skip success check but continue polling")
+                    // ⚠️ 关键修复：弹框显示期间继续轮询，不退出循环
+                    // 只有当用户确认取消后，才会通过 finishAttempt 退出
+                    if (paidTotalCents >= targetAmountCents) {
+                        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK paidTotalCents=$paidTotalCents >= targetAmountCents=$targetAmountCents but cancel dialog showing, skip success")
+                    }
+                    // 继续轮询，不 break
+                } else if (paidTotalCents >= targetAmountCents) {
                     // 收款完成
                     Log.d(
                         TAG,
@@ -1929,8 +1947,8 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                         }
                                     } catch (e2: Exception) {
                                         Log.e(TAG, "获取硬币器面额分配失败: deviceID=$deviceID", e2)
-                        }
-                    } else {
+                                    }
+                                } else {
                                     throw e
                                 }
                             } catch (e: Exception) {
@@ -3622,6 +3640,7 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
     
     /**
      * 取消支付（统一入口，支持卡支付和现金支付）
+     * ⚠️ 关键修复：现金支付必须通过 onUserCancelRequested 显示弹框，不能直接执行退款
      */
     fun cancelPayment() {
         val currentState = _flowState.value
@@ -3632,11 +3651,11 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         
         Log.d(TAG, "用户取消支付")
         
-        viewModelScope.launch {
-            try {
-                when (currentState.selectedPaymentMethod) {
-                    PaymentMethod.CARD -> {
-                        // 卡支付：调用 POS 服务的取消方法
+        when (currentState.selectedPaymentMethod) {
+            PaymentMethod.CARD -> {
+                // 卡支付：直接取消（卡支付不需要弹框确认）
+                viewModelScope.launch {
+                    try {
                         val cancelled = posPaymentService.cancelPayment()
                         if (cancelled) {
                             Log.d(TAG, "POS 支付取消成功")
@@ -3646,63 +3665,22 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
                             // 即使设备取消失败，也要执行本地取消
                             handlePaymentCancellation("用户取消支付")
                         }
-                    }
-
-                    PaymentMethod.CASH -> {
-                    // 现金支付：使用统一的 finishCashAttempt 方法
-                    Log.d(TAG, "现金支付取消...")
-                    viewModelScope.launch {
-                        try {
-                            // 从 CashDeviceRepository 获取 deviceID
-                            val billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
-                            val coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
-
-                            // 计算本次会话已收金额（基于 Levels 差分）
-                            val currentBillLevels =
-                                billDeviceID?.let { cashDeviceRepository.readCurrentLevels(it) }
-                            val currentCoinLevels =
-                                coinDeviceID?.let { cashDeviceRepository.readCurrentLevels(it) }
-
-                            // 从 baselineStore 获取 baseline levels
-                            val baselineStore = cashDeviceRepository.getBaselineStore()
-                            val billBaselineLevels =
-                                billDeviceID?.let { baselineStore.getBaselineLevels(it) }
-                            val coinBaselineLevels =
-                                coinDeviceID?.let { baselineStore.getBaselineLevels(it) }
-
-                            val paidSessionDeltaCents =
-                                cashDeviceRepository.calculateLevelsDeltaCents(
-                                    billBaselineLevels, currentBillLevels
-                                ) + cashDeviceRepository.calculateLevelsDeltaCents(
-                                    coinBaselineLevels, currentCoinLevels
-                                )
-
-                            val targetAmountCents = currentState.targetAmountCents
-
-                            // ⚠️ Step A: 使用统一的 finishAttempt 方法
-                            finishAttempt(
-                                reason = FinishReason.CANCEL,
-                                billDeviceID = billDeviceID,
-                                coinDeviceID = coinDeviceID,
-                                targetAmountCents = targetAmountCents,
-                                billBaselineLevels = billBaselineLevels,
-                                coinBaselineLevels = coinBaselineLevels
-                            )
-                        } catch (e: Exception) {
-                            Log.e(TAG, "现金支付取消异常", e)
-                            // 继续执行取消流程，不中断
-                        }
-                    }
-                        handlePaymentCancellation("用户取消现金支付")
-                    }
-
-                    null -> {
-                        Log.w(TAG, "支付方式为空，无法取消")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "取消支付异常", e)
+                        handlePaymentCancellation("取消支付异常: ${e.message}")
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "取消支付异常", e)
-                handlePaymentCancellation("取消支付异常: ${e.message}")
+            }
+
+            PaymentMethod.CASH -> {
+                // ⚠️ 关键修复：现金支付必须通过 onUserCancelRequested 显示弹框
+                // 不能直接执行退款，必须等待用户确认
+                Log.d(TAG, "现金支付取消：通过 onUserCancelRequested 显示弹框")
+                onUserCancelRequested(source = "CANCEL_PAYMENT_BUTTON")
+            }
+
+            null -> {
+                Log.w(TAG, "支付方式为空，无法取消")
             }
         }
     }
@@ -3722,7 +3700,15 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_clicked source=$source paid=$paidTotalCents sessionActive=$sessionActive state=${currentState.status}")
         
         // ⚠️ 关键修复：立即设置 cancelRequested = true，阻止 success 自动收尾
+        // ⚠️ 关键修复：使用 @Volatile 确保多线程可见性，立即生效
         cancelRequested = true
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancelRequested_SET_TO_TRUE source=$source")
+        
+        // ⚠️ 关键修复：验证 cancelRequested 已正确设置
+        if (!cancelRequested) {
+            Log.e("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK ERROR: cancelRequested should be true but is false!")
+            cancelRequested = true  // 强制设置
+        }
         
         // ⚠️ 关键修复：立即停止继续收款（DisableAcceptor / SetAutoAccept=false）
         viewModelScope.launch {
@@ -3763,7 +3749,14 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         }
         
         // 如果已投入金额 > 0，触发 UI 弹确认框
-        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_confirm_shown")
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_confirm_shown paidTotalCents=$paidTotalCents cancelRequested=$cancelRequested")
+        
+        // ⚠️ 关键修复：再次验证 cancelRequested 为 true（防止被意外重置）
+        if (!cancelRequested) {
+            Log.e("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK ERROR: cancelRequested was reset before showing dialog! Re-setting to true.")
+            cancelRequested = true
+        }
+        
         val confirmState = stateMachine.transition(
             currentState,
             PaymentFlowStatus.SHOW_CANCEL_CONFIRM,
@@ -3771,6 +3764,25 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         )
         if (confirmState != null) {
             _flowState.value = confirmState
+            Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK state_transitioned_to_SHOW_CANCEL_CONFIRM cancelRequested=$cancelRequested")
+            // ⚠️ 关键修复：状态转换成功后，再次验证 cancelRequested 为 true
+            if (!cancelRequested) {
+                Log.e("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK ERROR: cancelRequested was reset after state transition! Re-setting to true.")
+                cancelRequested = true
+            }
+        } else {
+            Log.e("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK state_transition_failed from=${currentState.status} to=SHOW_CANCEL_CONFIRM")
+            // ⚠️ 关键修复：如果状态转换失败，强制设置状态（确保弹框显示）
+            _flowState.value = currentState.copy(
+                status = PaymentFlowStatus.SHOW_CANCEL_CONFIRM,
+                errorMessage = "用户请求取消，需要确认"
+            )
+            Log.w("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK force_set_state_to_SHOW_CANCEL_CONFIRM cancelRequested=$cancelRequested")
+            // ⚠️ 关键修复：强制设置状态后，再次验证 cancelRequested 为 true
+            if (!cancelRequested) {
+                Log.e("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK ERROR: cancelRequested was reset after force set state! Re-setting to true.")
+                cancelRequested = true
+            }
         }
     }
     
@@ -3779,6 +3791,9 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
      */
     fun onUserCancelDismissed() {
         val currentState = _flowState.value
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK user_dismissed_cancel_dialog, resuming payment")
+        // ⚠️ 关键修复：用户选择继续支付，重置 cancelRequested 标志
+        cancelRequested = false
         val backToPayingState = stateMachine.transition(
             currentState,
             PaymentFlowStatus.PAYING,
@@ -3786,17 +3801,35 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         )
         if (backToPayingState != null) {
             _flowState.value = backToPayingState
+            Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK state_transitioned_to_PAYING")
+        } else {
+            Log.e("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK state_transition_failed from=${currentState.status} to=PAYING")
+            // ⚠️ 关键修复：如果状态转换失败，强制设置状态
+            _flowState.value = currentState.copy(
+                status = PaymentFlowStatus.PAYING
+            )
+            Log.w("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK force_set_state_to_PAYING")
         }
     }
     
     /**
      * ⚠️ 关键修复：用户确认取消后执行退款
      * 必须在用户确认取消后调用
+     * 此函数会：
+     * 1. 计算用户实际投入的金额（paidTotalCents）
+     * 2. 调用 finishAttempt(FinishReason.CANCEL) 执行退款
+     * 3. finishAttempt 内部会确保退款操作幂等，防止重复执行
      */
     suspend fun confirmCancelAndRefund() {
-        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_confirmed")
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_confirmed - 用户确认取消，开始执行退款")
         
         val currentState = _flowState.value
+        
+        // ⚠️ 关键修复：验证当前状态是否为 SHOW_CANCEL_CONFIRM
+        if (currentState.status != PaymentFlowStatus.SHOW_CANCEL_CONFIRM) {
+            Log.w("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK WARNING: confirmCancelAndRefund called but status=${currentState.status}, expected=SHOW_CANCEL_CONFIRM")
+        }
+        
         val billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
         val coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
         
@@ -3813,6 +3846,8 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         
         // ⚠️ 关键修复：使用统一的 finishAttempt 方法
         // ⚠️ 关键修复：finishAttempt 内部会"当场现算" paidTotalCents，使用本次会话的 baseline 和最新的 current levels
+        // ⚠️ 关键修复：finishAttempt 内部使用 finalizeMutex 和 attemptFinalized 标志确保退款操作幂等
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK calling finishAttempt(FinishReason.CANCEL)")
         finishAttempt(
             reason = FinishReason.CANCEL,
             billDeviceID = billDeviceID,
@@ -3822,7 +3857,7 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
             coinBaselineLevels = coinBaselineLevels
         )
         
-        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_finalize_done")
+        Log.d("CANCEL_FLOW_MARK", "CANCEL_FLOW_MARK cancel_finalize_done - 退款操作完成")
     }
     
     /**
@@ -4401,6 +4436,7 @@ fun resetForNewAttempt(reason: String) {
         isCashPaymentRunning = false
         attemptFinalized = false  // ⚠️ 关键修复：重置 attemptFinalized 标志
         finalizedTxId = null  // ⚠️ 关键修复：重置 finalizedTxId，允许新交易
+        cancelRequested = false  // ⚠️ 关键修复：重置 cancelRequested 标志，允许新交易
         
         // ⚠️ 关键修复：补充日志，方便确认重置是否生效
         Log.d("CASH_SESSION_RESET", "CASH_SESSION_RESET: resetForNewTransaction 完成, reason=$reason")
