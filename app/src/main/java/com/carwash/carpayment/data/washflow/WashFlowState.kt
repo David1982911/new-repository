@@ -91,6 +91,18 @@ sealed class WashFlowState {
     ) : WashFlowState()
     
     /**
+     * ⚠️ V3.1 新增：退款完成
+     * 订单在退款完成后才允许关闭
+     */
+    data class Refunded(
+        val program: WashProgram?,
+        val paymentMethod: PaymentMethod?,
+        val reason: RefundReason,
+        val refundAmountCents: Int = 0,
+        val registerSnapshot: RegisterSnapshot? = null
+    ) : WashFlowState()
+    
+    /**
      * 需要人工干预
      */
     data class ManualInterventionRequired(

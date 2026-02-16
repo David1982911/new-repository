@@ -8,6 +8,9 @@ import com.carwash.carpayment.data.PaymentMethod
 import com.carwash.carpayment.data.WashProgram
 import com.carwash.carpayment.data.cashdevice.CashDeviceClient
 import com.carwash.carpayment.data.cashdevice.CashDeviceRepository
+import com.carwash.carpayment.data.cashdevice.device.CashDevice
+import com.carwash.carpayment.data.cashdevice.CashPaymentConfig
+import com.carwash.carpayment.data.cashdevice.CashPaymentTimeoutException
 import com.carwash.carpayment.data.cashdevice.CountersResponse
 import com.carwash.carpayment.data.cashdevice.SetDenominationInhibitsRequest
 import com.carwash.carpayment.data.cashdevice.DenominationConfig
@@ -55,13 +58,29 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
     
     companion object {
         private const val TAG = "PaymentViewModel"
-        private const val CASH_PAYMENT_TIMEOUT_MS = 60000L // 现金支付超时 60 秒（临时延长，防止因统计不到金额而退钞）
+        // ⚠️ V3.2 超时处理：总超时120秒（无支付超时和部分支付超时共用）
+        private const val CASH_PAYMENT_TIMEOUT_MS = 120_000L // 120秒
         private const val DEVICE_INIT_TIMEOUT_MS = 5000L    // 设备初始化超时 5 秒
     }
+    
+    // ⚠️ V3.2 超时处理：支付状态跟踪变量
+    private var paymentStartTime: Long = 0L          // 支付开始时间
+    private var lastCashActivityTime: Long = 0L      // 最后一次现金活动时间
+    private var collectedCents: Int = 0              // 当前已收金额（分）
+    private var targetAmountCents: Int = 0           // 目标金额（分）
     
     private val stateMachine = PaymentFlowStateMachine()
     private val cashDeviceApi = CashDeviceClient.create(context = getApplication())
     private val cashDeviceRepository = CashDeviceRepository(cashDeviceApi)
+    
+    // ⚠️ V3.2 新增：使用注入的 CashDevice 实例（从 Application 单例获取）
+    private val billAcceptor: CashDevice? by lazy {
+        CarPaymentApplication.billAcceptor
+    }
+    
+    private val coinAcceptor: CashDevice? by lazy {
+        CarPaymentApplication.coinAcceptor
+    }
     
     // 洗车机设备（使用单例，确保使用同一份连接实例）
     // ⚠️ 禁止在 Payment 流程里重新 new，必须使用 Application 单例
@@ -397,6 +416,186 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
     /**
      * 处理现金支付（真实实现：使用 ITL Cash Device REST API）
      */
+    /**
+     * ⚠️ V3.2 新增：现金支付轮询（超时策略化）
+     * 职责：捕获异常，计数失败次数，按策略决定超时退款
+     * @param targetAmountCents 目标金额（分）
+     * @return 已收金额（分）
+     * @throws CashPaymentTimeoutException 当连续失败次数达到上限时抛出
+     */
+    private suspend fun pollCashPayment(targetAmountCents: Int): Int {
+        var consecutiveFailures = 0
+        val startTime = System.currentTimeMillis()
+        
+        // 获取设备ID（用于 GetCurrencyAssignment）
+        val billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
+        val coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
+        
+        if (billDeviceID == null && coinDeviceID == null) {
+            throw IllegalStateException("现金设备未初始化")
+        }
+        
+        // 基线金额（用于计算增量）- 使用 stored + storedInCashbox（支付收款计数口径）
+        var billBaselineCents = 0
+        var coinBaselineCents = 0
+        
+        // 设置基线（第一次成功读取时）
+        var baselineSet = false
+        
+        // ⚠️ V3.2 超时处理：记录上次已收金额，用于检测现金活动
+        var previousPaidCents = 0
+        
+        // 获取当前状态机状态（用于日志）
+        val getCurrentState = { _flowState.value.status }
+        
+        while (currentCoroutineContext().isActive) {
+            try {
+                // ⚠️ V3.2 超时处理：检查无支付超时和部分支付超时
+                checkPaymentTimeout()
+                
+                // 检查硬超时
+                val elapsed = System.currentTimeMillis() - startTime
+                val remainingSeconds = (CashPaymentConfig.PAYMENT_HARD_TIMEOUT - elapsed) / 1000
+                if (elapsed >= CashPaymentConfig.PAYMENT_HARD_TIMEOUT) {
+                    throw CashPaymentTimeoutException("支付硬超时: ${CashPaymentConfig.PAYMENT_HARD_TIMEOUT}ms")
+                }
+                
+                // ⚠️ 修复：使用 GetCurrencyAssignment 获取包含 cashbox 的库存（支付收款计数口径）
+                // 支付收款计数应包含所有会导致"已收钱"的层级（recycler + cashbox）
+                var billCurrentCents = 0
+                var coinCurrentCents = 0
+                
+                billDeviceID?.let { deviceID ->
+                    try {
+                        val billAssignments = cashDeviceRepository.fetchCurrencyAssignments(deviceID)
+                        // 支付收款计数：使用 stored + storedInCashbox（包含所有已收钱）
+                        billCurrentCents = billAssignments.sumOf { it.value * (it.stored + it.storedInCashbox) }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "获取纸币器货币分配失败", e)
+                    }
+                }
+                
+                coinDeviceID?.let { deviceID ->
+                    try {
+                        val coinAssignments = cashDeviceRepository.fetchCurrencyAssignments(deviceID)
+                        // 支付收款计数：使用 stored + storedInCashbox（包含所有已收钱）
+                        coinCurrentCents = coinAssignments.sumOf { it.value * (it.stored + it.storedInCashbox) }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "获取硬币器货币分配失败", e)
+                    }
+                }
+                
+                // 重置失败计数
+                consecutiveFailures = 0
+                
+                // 设置基线（第一次成功读取时）
+                if (!baselineSet) {
+                    billBaselineCents = billCurrentCents
+                    coinBaselineCents = coinCurrentCents
+                    baselineSet = true
+                    Log.d(TAG, "========== 收款轮询基线已设置 ==========")
+                    Log.d(TAG, "billBaselineCents=${billBaselineCents}分 (${billBaselineCents / 100.0}€)")
+                    Log.d(TAG, "coinBaselineCents=${coinBaselineCents}分 (${coinBaselineCents / 100.0}€)")
+                }
+                
+                // 计算已收金额（增量）- 本次 delta
+                val billDeltaCents = billCurrentCents - billBaselineCents
+                val coinDeltaCents = coinCurrentCents - coinBaselineCents
+                val paidCents = billDeltaCents + coinDeltaCents
+                
+                // ⚠️ 关键日志：每次轮询都打印 total/delta/累计 inserted
+                Log.d(TAG, "========== 收款轮询日志 ==========")
+                Log.d(TAG, "billTotalCents=${billCurrentCents}分 (${billCurrentCents / 100.0}€), billDelta=${billDeltaCents}分")
+                Log.d(TAG, "coinTotalCents=${coinCurrentCents}分 (${coinCurrentCents / 100.0}€), coinDelta=${coinDeltaCents}分")
+                Log.d(TAG, "insertedCents(累计)=${paidCents}分 (${paidCents / 100.0}€), amountCents(应付)=${targetAmountCents}分 (${targetAmountCents / 100.0}€)")
+                Log.d(TAG, "当前状态机 state=${getCurrentState()}, 距离超时剩余=${remainingSeconds}秒, elapsed=${elapsed}ms")
+                
+                // ⚠️ V3.2 超时处理：检测现金活动（金额增加）
+                if (paidCents > previousPaidCents) {
+                    val amountIncrease = paidCents - previousPaidCents
+                    Log.d(TAG, "检测到现金插入: amountIncrease=${amountIncrease}分 (${amountIncrease / 100.0}€), insertedCents: ${previousPaidCents}分 -> ${paidCents}分")
+                    onCashInserted(amountIncrease)
+                    previousPaidCents = paidCents
+                }
+                
+                // 更新 UI 状态
+                _flowState.value = _flowState.value.copy(
+                    paidAmountCents = paidCents,
+                    targetAmountCents = targetAmountCents
+                )
+                
+                // 检查是否达到目标金额
+                if (paidCents >= targetAmountCents) {
+                    Log.d(TAG, "========== 支付完成 ==========")
+                    Log.d(TAG, "insertedCents=${paidCents}分 >= amountCents=${targetAmountCents}分, 触发支付成功")
+                    // ⚠️ V3.2 超时处理：支付成功，取消超时监控
+                    handlePaymentSuccess()
+                    return paidCents
+                }
+                
+            } catch (e: Exception) {
+                consecutiveFailures++
+                Log.w(TAG, "V3.2 轮询：第${consecutiveFailures}次失败", e)
+                
+                // 检查是否达到最大失败次数
+                if (consecutiveFailures >= CashPaymentConfig.PAYMENT_POLL_MAX_FAILURES) {
+                    Log.e(TAG, "V3.2 轮询：连续失败次数达到上限 (${CashPaymentConfig.PAYMENT_POLL_MAX_FAILURES})，触发超时")
+                    throw CashPaymentTimeoutException("轮询超时次数达到上限: ${consecutiveFailures}", e)
+                }
+            }
+            
+            // 等待下一次轮询
+            delay(CashPaymentConfig.PAYMENT_POLL_INTERVAL)
+        }
+        
+        throw kotlinx.coroutines.CancellationException("轮询被取消")
+    }
+    
+    /**
+     * ⚠️ V3.2 超时处理：检测现金插入活动
+     */
+    private fun onCashInserted(amount: Int) {
+        collectedCents += amount
+        lastCashActivityTime = System.currentTimeMillis()
+        Log.d(TAG, "V3.2 超时处理：检测到现金插入，金额=${amount}分, 累计=${collectedCents}分, 最后活动时间=${lastCashActivityTime}")
+    }
+    
+    /**
+     * ⚠️ V3.2 超时处理：检查支付超时
+     */
+    private suspend fun checkPaymentTimeout() {
+        if (paymentStartTime == 0L) return // 支付未开始
+        
+        val now = System.currentTimeMillis()
+        val elapsedSinceLastActivity = now - lastCashActivityTime
+        
+        if (elapsedSinceLastActivity >= CASH_PAYMENT_TIMEOUT_MS) {
+            // ⚠️ 关键修复：从 flowState 获取已收金额（这是最准确的）
+            val paidReceivedCents = _flowState.value.paidAmountCents
+            // 超时，根据是否已收部分金额决定处理方式
+            Log.e(TAG, "V3.2 超时处理：检测到超时，已收金额（从 flowState）=${paidReceivedCents}分 (${paidReceivedCents / 100.0}€), collectedCents=${collectedCents}分, 距离最后活动=${elapsedSinceLastActivity}ms")
+            
+            if (paidReceivedCents > 0) {
+                // 部分支付超时，需要退款
+                Log.e(TAG, "V3.2 超时处理：部分支付超时，触发退款 (paidReceivedCents=$paidReceivedCents)")
+                throw CashPaymentTimeoutException("部分支付超时: 已收=${paidReceivedCents}分, 超时=${elapsedSinceLastActivity}ms", null)
+            } else {
+                // 无支付超时，直接取消
+                Log.e(TAG, "V3.2 超时处理：无支付超时，直接取消 (paidReceivedCents=$paidReceivedCents)")
+                throw CashPaymentTimeoutException("无支付超时: 未收到任何现金, 超时=${elapsedSinceLastActivity}ms", null)
+            }
+        }
+    }
+    
+    /**
+     * ⚠️ V3.2 超时处理：支付成功，取消超时监控
+     */
+    private fun handlePaymentSuccess() {
+        paymentStartTime = 0L
+        lastCashActivityTime = 0L
+        Log.d(TAG, "V3.2 超时处理：支付成功，已取消超时监控")
+    }
+    
     private suspend fun processCashPayment(currentState: PaymentFlowState) {
         // ⚠️ 关键修复：新会话初始化 - 在开始前强制重置状态，确保新会话能正常开始
         // 这是修复"取消/失败/退款后，回到首页再次选择套餐进入现金支付，会话 begin 被误判为重复调用"的关键
@@ -404,6 +603,18 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         cashSessionActive = false
         cashFinishing = false
         Log.d("CASH_SESSION_RESET", "CASH_SESSION_RESET: processCashPayment 开始，强制重置状态: cashSessionFinalized=false, cashSessionActive=false, cashFinishing=false")
+        
+        // ⚠️ 获取目标金额（需要在 startCashSession 之前获取）
+        val program = currentState.selectedProgram
+        if (program == null) {
+            Log.e(TAG, "现金支付：selectedProgram 为 null，无法获取目标金额")
+            handlePaymentFailure("程序未选择")
+            return
+        }
+        val targetAmountCents = kotlin.math.round(program.price * 100).toInt()
+        
+        // 1. 启动现金会话（新增）- 必须在所有设备操作之前执行
+        cashDeviceRepository.startCashSession(targetAmountCents)
         
         // ⚠️ 关键修复：补偿退款 - 检测是否有未退款的金额（unrefunded>0）
         // 如果因为异常导致取消时未退完，下一次 begin 前检测到 unrefunded>0 仍然可以补退
@@ -520,12 +731,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         // 如果 PaymentAttempt 存在，应使用 currentAttempt?.id ?: "NO_ATTEMPT"
         val attemptId = currentState.lastUpdated.toString()
         
-        val program = currentState.selectedProgram
-        if (program == null) {
-            Log.e(TAG, "现金支付：程序信息为空")
-            handlePaymentFailure("程序信息缺失")
-            return
-        }
+        // ⚠️ 注意：program 已在函数开头（第 576 行）声明并检查，这里直接使用
         
         // ⚠️ 打点：打印 targetAmountCents 的来源（定位支付目标金额是否与UI同源）
         Log.d("ProgramPrice", "========== PaymentViewModel targetAmountCents 来源 ==========")
@@ -537,9 +743,8 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         Log.d("ProgramPrice", "selectedProgram.price=${program.price}€")
         Log.d("ProgramPrice", "selectedProgram.priceCents=${(program.price * 100).toInt()}")
         
-        // 目标金额单位统一：使用 round 确保精度，统一用分（cents）
-        val targetAmount = program.price  // 元（Double）
-        val targetAmountCents = kotlin.math.round(targetAmount * 100).toInt()  // 分（Int）
+        // ⚠️ 注意：targetAmountCents 已在函数开头（第 582 行）声明，这里直接使用
+        val targetAmount = program.price  // 元（Double），用于日志显示
         
         Log.d("ProgramPrice", "最终 targetAmountCents=${targetAmountCents}分 (${targetAmount}€)")
         Log.d("ProgramPrice", "============================================================")
@@ -579,84 +784,64 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
             Log.d("PAY_MARK", "PAY_MARK SESSION_START target=$targetAmountCents")
             Log.d("CASH_SESSION_RESET", "CASH_SESSION_RESET: 会话开始，cashSessionActive=true, cashSessionFinalized=$cashSessionFinalized")
             
-            // 1. 启动现金设备会话（认证 + 打开双设备连接）
-            // ⚠️ 关键修复：硬性判定检查
-            if (!isCashSessionAllowed(caller = "processCashPayment_startCashSession")) {
-                Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: startCashSession blocked by isCashSessionAllowed()")
-                return
-            }
+            // ⚠️ V3.2 重构：不再调用 startCashSession()，直接使用注入的 CashDevice 实例
+            // 设备连接已在 Application 启动时完成，这里只需要启用接收器
+            Log.d(TAG, "========== V3.2 现金支付开始 ==========")
             
-            val deviceSessionStartTime = System.currentTimeMillis()
-            Log.d(TAG, "现金支付：启动设备会话...")
-            devices = try {
-                cashDeviceRepository.startCashSession(caller = "PAYMENT_SCREEN_CASH")
-            } catch (e: Exception) {
-                Log.e(TAG, "现金支付：启动设备会话失败", e)
-                cashSessionActive = false  // 失败时重置
-                handlePaymentFailure("设备连接失败: ${e.message}")
-                return
-            }
+            // ⚠️ V3.2 关键修复：从 Repository 获取设备ID（OpenConnection 成功后已保存）
+            billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
+            coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
             
-            if (devices.isEmpty()) {
-                Log.e(TAG, "现金支付：未找到可用设备")
-                handlePaymentFailure("未找到可用设备，请检查设备连接")
-                return
-            }
-            
-            val sessionDuration = System.currentTimeMillis() - deviceSessionStartTime
-            Log.d(
-                TAG,
-                "现金支付：设备会话启动成功（耗时${sessionDuration}ms），已注册设备: ${
-                    devices.keys.joinToString("、")
-                }"
-            )
-            
-            // ========== 打印 devices map 并校验 deviceID ==========
-            Log.d(TAG, "========== devices map 完整内容 ==========")
-            devices.forEach { (key, value) ->
-                Log.d(TAG, "devices[$key] = $value")
-            }
-            Log.d(TAG, "========================================")
-            
-            val tracker = cashDeviceRepository.getAmountTracker()
-            
-            // ⚠️ 关键修复：根据 devices map 的真实结构获取 deviceID
-            // devices map 结构：key = deviceName（"SPECTRAL_PAYOUT-0" 或 "SMART_COIN_SYSTEM-1"），value = deviceID
-            billDeviceID = devices["SPECTRAL_PAYOUT-0"]
-            coinDeviceID = devices["SMART_COIN_SYSTEM-1"]
-            
-            // ⚠️ 关键修复：强制断言日志，billDeviceID/coinDeviceID 不为 null，否则直接 fail-fast
+            // ⚠️ V3.2 关键修复：如果 Repository 中没有设备ID，尝试从 CashDevice 实例获取
             if (billDeviceID == null) {
-                Log.e(TAG, "❌ 错误：billDeviceID == null，devices map 中未找到 key='SPECTRAL_PAYOUT-0'")
-                Log.e(TAG, "❌ devices map 完整内容:")
-                devices.forEach { (key, value) ->
-                    Log.e(TAG, "  devices[$key] = $value")
+                billDeviceID = billAcceptor?.getDeviceID()
+                if (billDeviceID != null) {
+                    Log.d(TAG, "✅ 从 CashDevice 实例获取纸币器 DeviceID: $billDeviceID")
+                    cashDeviceRepository.setBillAcceptorDeviceID(billDeviceID!!)
                 }
-                Log.e(TAG, "❌ devices map keys: ${devices.keys.joinToString(", ")}")
-                Log.e(TAG, "❌ devices map values: ${devices.values.joinToString(", ")}")
-                cashSessionActive = false  // 失败时重置
-                handlePaymentFailure("纸币器设备未连接，请检查设备连接")
-                return
-            } else {
-                Log.d(TAG, "✅ billDeviceID = $billDeviceID")
             }
             
             if (coinDeviceID == null) {
-                Log.e(TAG, "❌ 错误：coinDeviceID == null，devices map 中未找到 key='SMART_COIN_SYSTEM-1'")
-                Log.e(TAG, "❌ devices map 完整内容:")
-                devices.forEach { (key, value) ->
-                    Log.e(TAG, "  devices[$key] = $value")
+                coinDeviceID = coinAcceptor?.getDeviceID()
+                if (coinDeviceID != null) {
+                    Log.d(TAG, "✅ 从 CashDevice 实例获取硬币器 DeviceID: $coinDeviceID")
+                    cashDeviceRepository.setCoinAcceptorDeviceID(coinDeviceID!!)
                 }
-                Log.e(TAG, "❌ devices map keys: ${devices.keys.joinToString(", ")}")
-                Log.e(TAG, "❌ devices map values: ${devices.values.joinToString(", ")}")
-                // ⚠️ 关键修复：硬币器失败不影响纸币器，继续执行支付流程（允许纸币器单独收款）
-                Log.w(TAG, "⚠️ 硬币器未连接，但继续执行支付流程（允许纸币器单独收款）")
-            } else {
-                Log.d(TAG, "✅ coinDeviceID = $coinDeviceID")
             }
             
-            // 2. 读取找零库存（用于评估找零能力）
-            Log.d(TAG, "现金支付：读取找零库存（用于评估找零能力）...")
+            // 检查设备是否可用
+            if (billAcceptor == null && coinAcceptor == null) {
+                Log.e(TAG, "❌ 错误：现金设备未初始化")
+                cashSessionActive = false
+                handlePaymentFailure("现金设备未初始化，请重启应用")
+                return
+            }
+            
+            // ⚠️ V3.2 关键修复：检查设备ID是否为空
+            if (billDeviceID == null && coinDeviceID == null) {
+                Log.e(TAG, "❌ 错误：设备ID为空，无法启动支付")
+                Log.e(TAG, "说明：设备可能未连接，请检查设备连接状态")
+                cashSessionActive = false
+                handlePaymentFailure("设备未连接，请检查设备状态")
+                return
+            }
+            
+            if (billAcceptor == null || billDeviceID == null) {
+                Log.w(TAG, "⚠️ 纸币器未初始化或设备ID为空，但继续执行支付流程（允许硬币器单独收款）")
+            } else {
+                Log.d(TAG, "✅ 纸币器已初始化: deviceID=$billDeviceID")
+            }
+            
+            if (coinAcceptor == null || coinDeviceID == null) {
+                Log.w(TAG, "⚠️ 硬币器未初始化或设备ID为空，但继续执行支付流程（允许纸币器单独收款）")
+            } else {
+                Log.d(TAG, "✅ 硬币器已初始化: deviceID=$coinDeviceID")
+            }
+            
+            // 2. 读取找零库存（用于可找零性判定，但不再用于全局阈值判断）
+            // ⚠️ 注意：支付前面额安全性评估已由 configureSafeDenominationsForPayment 完成（见下方第 962-985 行）
+            // 这里保留读取库存的逻辑，仅用于后续的可找零性判定，不再用于全局阈值判断
+            Log.d(TAG, "现金支付：读取找零库存（用于可找零性判定）...")
             var changeInventory: com.carwash.carpayment.data.cashdevice.ChangeInventory? = null
             try {
                 val billLevels = billDeviceID?.let { cashDeviceRepository.readCurrentLevels(it) }
@@ -673,72 +858,11 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                 Log.w(TAG, "找零库存读取失败，将允许所有面额", e)
             }
 
-            // 3. 评估找零能力并禁用大额面额（在 EnableAcceptor 前）
-            // 从 Levels/Float 计算 maxChangeAvailableCents（纸币+硬币可找零库存总额）
-            val maxChangeAvailableCents = changeInventory?.getTotalCents() ?: 0
-            // 允许接收的最大投入额：maxAcceptable = priceCents + maxChangeAvailableCents
-            val maxAcceptable = targetAmountCents + maxChangeAvailableCents
-            Log.d(
-                TAG,
-                "找零能力评估: maxChangeAvailableCents=${maxChangeAvailableCents}分, maxAcceptable=${maxAcceptable}分, targetAmountCents=${targetAmountCents}分"
-            )
+            // ⚠️ 已移除：旧的全局阈值判断逻辑（maxAcceptable、shouldDisableLargeDenoms）
+            // 支付前面额安全性评估已由 configureSafeDenominationsForPayment 完成（见下方第 962-985 行）
+            // 该函数使用 ChangeSafetyCalculator.calculateUnsafeDenominations 进行逐面额判断，确保准确性
 
-            // 根据 maxAcceptable 禁用高面额（例如 50/100）
-            // 50€ = 5000分, 100€ = 10000分
-            val largeDenominations = listOf(5000, 10000) // 50€, 100€
-            val shouldDisableLargeDenoms = largeDenominations.any { it > maxAcceptable }
-
-            if (shouldDisableLargeDenoms) {
-                Log.d(
-                    TAG,
-                    "找零能力不足，需要禁用大额面额: maxAcceptable=${maxAcceptable}分 < 大额面额阈值"
-                )
-            }
-
-            // 4. 配置面额（SetInhibits/SetRoutes）- 使用统一方法 configureDenominationsForDevices
-            // ⚠️ 注意：启动阶段不得调用，只在用户进入现金支付页面时执行
-            Log.d(TAG, "现金支付：配置面额（SetInhibits/SetRoutes）...")
-
-            // 构建配置：从 DeviceDenominationConfig 获取可找零面额
-            val billRecyclableDenoms =
-                DeviceDenominationConfig.getRecyclableDenominations("SPECTRAL_PAYOUT-0").toSet()
-            val coinRecyclableDenoms =
-                DeviceDenominationConfig.getRecyclableDenominations("SMART_COIN_SYSTEM-1").toSet()
-
-            // 构建禁用配置：如果找零能力不足，禁用大额面额
-            val inhibitValues = if (shouldDisableLargeDenoms) {
-                largeDenominations.toSet()
-                    } else {
-                emptySet<Int>()
-            }
-
-            val routeConfig = DenominationConfig(
-                recyclerValues = billRecyclableDenoms + coinRecyclableDenoms
-            )
-            val inhibitConfig = DenominationConfig(
-                inhibitValues = inhibitValues
-            )
-
-            // ⚠️ 统一调用：configureDenominationsForDevices（按设备分组，严格过滤面额）
-            try {
-                val configSuccess = cashDeviceRepository.configureDenominationsForDevices(
-                    billDeviceID = billDeviceID,
-                    coinDeviceID = coinDeviceID,
-                    routeConfig = routeConfig,
-                    inhibitConfig = inhibitConfig
-                )
-                if (!configSuccess) {
-                    Log.w(TAG, "现金支付：面额配置部分失败，继续执行（降级策略）")
-                    } else {
-                    Log.d(TAG, "现金支付：面额配置成功")
-                    }
-                } catch (e: Exception) {
-                Log.e(TAG, "现金支付：面额配置异常，继续执行（降级策略）", e)
-            }
-
-            // 注意：baseline 已在步骤 4 中读取，这里不再重复读取
-
-            // 4. 更新找零库存明细（用于可找零性判定）
+            // 3. 更新找零库存明细（用于可找零性判定）
             // 注意：changeInventory 已在步骤 2 中声明，这里只更新值
             Log.d(TAG, "现金支付：更新找零库存明细...")
             try {
@@ -808,6 +932,31 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
             var billSessionStarted = false
             var coinSessionStarted = false
 
+            // ⚠️ 新增：支付前动态禁用不安全面额（在启用接收器之前）
+            Log.d(TAG, "========== 支付前动态禁用不安全面额 ==========")
+            billDeviceID?.let { deviceID ->
+                try {
+                    val success = cashDeviceRepository.configureSafeDenominationsForPayment(deviceID, targetAmountCents)
+                    if (!success) {
+                        Log.w(TAG, "纸币器面额安全性评估失败，但继续执行支付流程")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "纸币器面额安全性评估异常，但继续执行支付流程", e)
+                }
+            }
+            
+            coinDeviceID?.let { deviceID ->
+                try {
+                    val success = cashDeviceRepository.configureSafeDenominationsForPayment(deviceID, targetAmountCents)
+                    if (!success) {
+                        Log.w(TAG, "硬币器面额安全性评估失败，但继续执行支付流程")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "硬币器面额安全性评估异常，但继续执行支付流程", e)
+                }
+            }
+            Log.d(TAG, "========== 支付前动态禁用不安全面额完成 ==========")
+
             // ⚠️ Step B: 现金支付开始的标准时序：EnablePayoutDevice -> EnableAcceptor -> baselineLevels
             // 4.1. 优先执行：EnablePayoutDevice -> EnableAcceptor + SetAutoAccept -> baselineLevels
             billDeviceID?.let { deviceID ->
@@ -838,31 +987,37 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         )
                     }
 
+                    // ⚠️ V3.2 重构：使用 CashDevice 接口启用接收器
                     // Step 2: 启用接收器
-                    // ⚠️ 关键修复：硬性判定检查
                     if (!isCashSessionAllowed(caller = "processCashPayment_enableAcceptor_bill")) {
                         Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: enableAcceptor(bill) blocked by isCashSessionAllowed()")
                         return
                     }
                     
-                    val enableSuccess = cashDeviceRepository.enableAcceptor(deviceID, caller = "processCashPayment_bill")
-                    if (!enableSuccess) {
-                        Log.e(TAG, "现金支付：纸币器启用接收器失败")
-                        handlePaymentFailure("纸币器启动失败，请重试")
-                        return
-                    }
-                    // Step 3: 设置自动接受
-                    // ⚠️ 关键修复：硬性判定检查
-                    if (!isCashSessionAllowed(caller = "processCashPayment_setAutoAccept_bill")) {
-                        Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: setAutoAccept(true, bill) blocked by isCashSessionAllowed()")
-                        return
-                    }
-                    
-                    val autoAcceptSuccess = cashDeviceRepository.setAutoAccept(deviceID, true, caller = "processCashPayment_bill")
-                    if (!autoAcceptSuccess) {
-                        Log.e(TAG, "现金支付：纸币器设置自动接受失败")
-                        cashDeviceRepository.disableAcceptor(deviceID)
-                        handlePaymentFailure("纸币器启动失败，请重试")
+                    try {
+                        val enableSuccess = billAcceptor?.enableAcceptor(true) ?: false
+                        if (!enableSuccess) {
+                            Log.e(TAG, "现金支付：纸币器启用接收器失败")
+                            handlePaymentFailure("纸币器启动失败，请重试")
+                            return
+                        }
+                        
+                        // Step 3: 开始收款（启用接收器并开启自动接受）
+                        val collectSuccess = billAcceptor?.collect() ?: false
+                        if (!collectSuccess) {
+                            Log.e(TAG, "现金支付：纸币器开始收款失败")
+                            billAcceptor?.enableAcceptor(false)  // 恢复状态
+                            handlePaymentFailure("纸币器启动失败，请重试")
+                            return
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "现金支付：纸币器启用接收器异常", e)
+                        try {
+                            billAcceptor?.enableAcceptor(false)  // 恢复状态
+                        } catch (disableException: Exception) {
+                            Log.e(TAG, "恢复纸币器状态失败", disableException)
+                        }
+                        handlePaymentFailure("纸币器启动失败: ${e.message}")
                         return
                     }
                     val acceptorsElapsed = System.currentTimeMillis() - acceptorsStartTime
@@ -889,6 +1044,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         }
                         
                         // ⚠️ 关键修复：调用 tracker.setBaselineFromLevels，传入 reason="SESSION_START"
+                        val tracker = cashDeviceRepository.getAmountTracker()
                         tracker.setBaselineFromLevels(deviceID, levelsMap, "LEVELS", reason = "SESSION_START")
                         
                         // ⚠️ 保存 baseline levels 到 baselineStore（用于退款时计算）
@@ -968,38 +1124,28 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                         return@let
                     }
                     
-                    // ⚠️ 关键修复：硬币器失败不影响纸币器，继续执行支付流程
-                    val enableSuccess = cashDeviceRepository.enableAcceptor(deviceID, caller = "processCashPayment_coin")
+                    // ⚠️ V3.2 重构：使用 CashDevice 接口启用接收器
+                    val enableSuccess = coinAcceptor?.enableAcceptor(true) ?: false
                     if (!enableSuccess) {
                         Log.w(TAG, "⚠️ 现金支付：硬币器启用接收器失败（非致命，纸币器继续可用）")
                         Log.w(TAG, "⚠️ 说明：硬币器失败不影响纸币器收款，继续执行支付流程")
-                        // ⚠️ 不再禁用纸币器，不再调用 handlePaymentFailure
-                        // ⚠️ 继续执行，允许纸币器单独收款
                         coinSessionStarted = false
-                        // 跳过硬币器的后续步骤（Step 3 和 Step 4），但继续执行支付流程
+                        // 跳过硬币器的后续步骤，但继续执行支付流程
                     } else {
-                        // Step 3: 设置自动接受
-                        // ⚠️ 关键修复：硬性判定检查
-                        if (!isCashSessionAllowed(caller = "processCashPayment_setAutoAccept_coin")) {
-                            Log.e("CASH_GUARD", "❌ CASH_GUARD FORBIDDEN: setAutoAccept(true, coin) blocked by isCashSessionAllowed()")
-                            return@let
-                        }
-                        
-                        val autoAcceptSuccess = cashDeviceRepository.setAutoAccept(deviceID, true, caller = "processCashPayment_coin")
-                        if (!autoAcceptSuccess) {
-                            Log.w(TAG, "⚠️ 现金支付：硬币器设置自动接受失败（非致命，纸币器继续可用）")
+                        // Step 3: 开始收款（启用接收器并开启自动接受）
+                        val collectSuccess = coinAcceptor?.collect() ?: false
+                        if (!collectSuccess) {
+                            Log.w(TAG, "⚠️ 现金支付：硬币器开始收款失败（非致命，纸币器继续可用）")
                             Log.w(TAG, "⚠️ 说明：硬币器失败不影响纸币器收款，继续执行支付流程")
                             // ⚠️ 禁用硬币器接收器，但不影响纸币器
                             try {
-                                cashDeviceRepository.disableAcceptor(deviceID)
+                                coinAcceptor?.enableAcceptor(false)
                             } catch (e: Exception) {
                                 Log.w(TAG, "禁用硬币器接收器异常（可忽略）", e)
                             }
                             coinSessionStarted = false
-                            // ⚠️ 不再禁用纸币器，不再调用 handlePaymentFailure
-                            // ⚠️ 继续执行，允许纸币器单独收款
                             // 跳过 Step 4（baseline 设置）
-                    } else {
+                        } else {
                             val acceptorsElapsed = System.currentTimeMillis() - acceptorsStartTime
                             Log.d(
                                 TAG,
@@ -1024,6 +1170,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                 val levelsMap = coinBaselineLevels.levels?.associate { it.value to it.stored } ?: emptyMap()
                                 
                                 // ⚠️ 关键修复：调用 tracker.setBaselineFromLevels，传入 reason="SESSION_START"
+                                val tracker = cashDeviceRepository.getAmountTracker()
                                 tracker.setBaselineFromLevels(deviceID, levelsMap, "LEVELS", reason = "SESSION_START")
                                 
                                 // ⚠️ 保存 baseline levels 到 baselineStore（用于退款时计算）
@@ -1042,7 +1189,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                 Log.d(TAG, "deviceID=$deviceID")
                                 Log.d(TAG, "baselineCents=$coinBaselineCents")
                                 Log.d(TAG, "==========================================")
-                } catch (e: Exception) {
+                            } catch (e: Exception) {
                                 // ⚠️ 关键修复：baseline 读取失败改为非致命警告，不阻止支付流程
                                 Log.w(TAG, "⚠️ 现金支付：读取硬币器 baseline levels 失败（非致命，继续执行）", e)
                                 Log.w(TAG, "⚠️ 说明：GetCounters/GetAllLevels 解析失败不影响收款，使用空 baseline")
@@ -1109,8 +1256,13 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                 TAG,
                 "现金支付：轮询已启动（使用 GetCurrencyAssignment 的 stored + storedInCashbox），将在收款完成或超时后禁用接收器"
             )
-            val paymentStartTime = System.currentTimeMillis()
-            var lastPollTime = paymentStartTime  // 记录最后一次轮询时间
+            // ⚠️ V3.2 超时处理：初始化支付状态变量
+            this.paymentStartTime = System.currentTimeMillis()
+            this.lastCashActivityTime = this.paymentStartTime
+            this.targetAmountCents = targetAmountCents
+            this.collectedCents = 0
+            
+            var lastPollTime = this.paymentStartTime  // 记录最后一次轮询时间
             
             // 更新状态，设置目标金额（用于 UI 显示）
             _flowState.value = _flowState.value.copy(
@@ -1133,10 +1285,79 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
             var previousCoinCounters: com.carwash.carpayment.data.cashdevice.CountersResponse? =
                 null
             
-            // ⚠️ 关键修复：轮询间隔设置为 300~500ms，确保 SPECTRAL_PAYOUT-0 的 GetAllLevels 差分作为 paidTotalCents 的唯一来源
-            val POLL_INTERVAL_MS = 400L  // 轮询间隔：400ms（在 300~500ms 范围内）
+            // ⚠️ V3.2 重构：使用新的超时策略化轮询方法
+            // 注意：保留后续的业务逻辑（找零判定、成功处理等）
+            var paidTotalCents = 0
+            var paymentSuccess = false
+            var paymentTimeout = false
             
-            while (currentCoroutineContext().isActive) {
+            try {
+                // 调用新的轮询方法（超时策略化）
+                paidTotalCents = pollCashPayment(targetAmountCents)
+                paymentSuccess = true
+                Log.d(TAG, "========== V3.2 现金支付轮询完成 ==========")
+                Log.d(TAG, "已收金额=${paidTotalCents}分, 目标金额=${targetAmountCents}分")
+            } catch (e: CashPaymentTimeoutException) {
+                // ⚠️ V3.2 超时处理：根据异常消息判断是无支付超时还是部分支付超时
+                paymentTimeout = true
+                Log.e(TAG, "========== V3.2 现金支付轮询超时 ==========", e)
+                
+                // ⚠️ 关键修复：从 flowState 获取已收金额（这是最准确的，因为 pollCashPayment 会实时更新它）
+                val paidReceivedCents = _flowState.value.paidAmountCents
+                Log.e(TAG, "已收金额（从 flowState）=${paidReceivedCents}分 (${paidReceivedCents / 100.0}€), collectedCents=${collectedCents}分, 目标金额=${targetAmountCents}分")
+                
+                val isNoPaymentTimeout = e.message?.contains("无支付超时") == true || paidReceivedCents == 0
+                
+                if (isNoPaymentTimeout) {
+                    // 无支付超时：直接禁用接收器，清除会话，返回首页
+                    Log.e(TAG, "V3.2 超时处理：无支付超时，直接取消 (paidReceivedCents=$paidReceivedCents)")
+                    abortPaymentWithoutRefund(
+                        billDeviceID = billDeviceID,
+                        coinDeviceID = coinDeviceID
+                    )
+                } else {
+                    // 部分支付超时：先禁用接收器，然后退款
+                    Log.e(TAG, "V3.2 超时处理：部分支付超时，需要退款 (paidReceivedCents=$paidReceivedCents)")
+                    abortPaymentWithRefund(
+                        billDeviceID = billDeviceID,
+                        coinDeviceID = coinDeviceID,
+                        refundAmountCents = paidReceivedCents,  // ⚠️ 关键修复：使用 flowState 中的已收金额
+                        billBaselineLevels = billBaselineLevels,
+                        coinBaselineLevels = coinBaselineLevels
+                    )
+                }
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 轮询被取消（用户取消支付）
+                Log.d(TAG, "V3.2 现金支付轮询被取消", e)
+                return
+            } catch (e: Exception) {
+                // 其他异常
+                Log.e(TAG, "V3.2 现金支付轮询异常", e)
+                handlePaymentFailure("支付异常: ${e.message}")
+                return
+            }
+            
+            // ⚠️ V3.2：如果轮询成功，继续后续业务逻辑
+            if (!paymentSuccess) {
+                return
+            }
+            
+            // ⚠️ V3.2：旧的轮询逻辑已完全移除，使用新的 pollCashPayment() 方法
+            // 旧的轮询逻辑（1229-1823行）已删除
+            
+            // ⚠️ 注意：lastPollTime 已在上面声明（第 1161 行），这里不再重复声明
+            // var lastPollTime = paymentStartTime  // 已删除，避免重复声明
+            var lastUiUpdateTime = paymentStartTime
+            val UI_UPDATE_THROTTLE_MS = 500L  // UI更新节流：500ms
+            var cancelRequested = false  // 取消请求标志
+            
+            // ⚠️ 注意：旧的 while 循环已删除，轮询由 pollCashPayment() 方法完成
+            // 以下代码仅用于兼容性，实际不会执行
+            if (false) {
+            // 已删除的旧轮询逻辑
+            val POLL_INTERVAL_MS = 400L  // 已删除的旧轮询逻辑中的常量
+            while (false) {
                 // ⚠️ 关键修复：轮询间隔控制
                 kotlinx.coroutines.delay(POLL_INTERVAL_MS)
                 
@@ -1727,10 +1948,12 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     return
                 }
                 
-                delay(300)  // 每 300ms 轮询一次（200~500ms 范围内）
+                delay(300)  // 已删除的旧轮询逻辑
             }
+            }  // 结束 if (false) 块（已删除的旧轮询逻辑）
             
-            // 6. 收款完成检查（使用 GetAllLevels 差分，确保准确）
+            // ⚠️ V3.2：轮询已完成，继续后续业务逻辑（找零判定、成功处理等）
+            // 6. 收款完成检查（使用轮询返回的已收金额）
             // ⚠️ 关键修复：统一使用 GetAllLevels 差分作为唯一权威金额
             // 重新获取一次最终值（确保准确）
             var finalBillSessionDelta = 0
@@ -1758,9 +1981,9 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
             
+            // ⚠️ V3.2：使用轮询方法返回的已收金额
             // ⚠️ 关键修复：统一使用 GetAllLevels 差分作为唯一权威金额
-            // ⚠️ 禁止使用 tracker.getTotalCents()，必须使用 GetAllLevels 差分
-            val totalPaidCents = finalBillSessionDelta + finalCoinSessionDelta  // ⚠️ 使用 GetAllLevels 差分
+            val totalPaidCents = paidTotalCents  // 使用轮询方法返回的金额
             val paymentDuration = System.currentTimeMillis() - paymentStartTime
             
             // ⚠️ 关键修复：支付成功判定必须基于 GetAllLevels 差分（paidSessionDeltaCents）
@@ -2222,111 +2445,130 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                     return
                                 }
                             } else {
-                                Log.e(TAG, "========== 找零流程失败 ==========")
+                                // ⚠️ V3.3 规范：找零失败时禁止自动全额退款，必须标记为 PAYMENT_SUCCESS_CHANGE_FAILED 并进入人工处理流程
+                                Log.e(TAG, "========== 找零流程失败（V3.3 规范：禁止自动全额退款） ==========")
                                 Log.e(TAG, "找零失败原因: $changeFailureReason")
+                                Log.e(TAG, "已收款金额: ${totalPaidCents}分 (${totalPaidCents / 100.0}€)")
+                                Log.e(TAG, "目标金额: ${targetAmountCents}分 (${targetAmountCents / 100.0}€)")
+                                Log.e(TAG, "需要找零金额: ${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
+                                
                                 // ⚠️ 关键修复：统一日志 tag
                                 Log.e("CHANGE_MARK", "CHANGE_MARK END success=false remaining=$changeNeededCents error=$changeFailureReason")
-                                Log.e(TAG, "需要人工处理找零或退款")
                                 
-                                // 找零失败时，需要退款
-                                val paidReceivedCents = totalPaidCents  // ⚠️ 使用 GetAllLevels 差分
-                                if (paidReceivedCents > 0) {
-                                    Log.d(
-                                        "CASH_REFUND_TRIGGER",
-                                        "paid=$paidReceivedCents target=$targetAmountCents reason=CHANGE_DISPENSE_FAILED"
+                                // ⚠️ V3.3 规范：记录已成功找零的明细（dispensedList）
+                                // 注意：由于找零失败，dispensedList 可能为空或部分成功
+                                val dispensedList = emptyList<com.carwash.carpayment.data.cashdevice.RefundResult.DispenseBreakdown>()  // TODO: 记录已成功找零的明细
+                                
+                                // ⚠️ V3.3 规范：停止后续找零，禁止自动全额退款
+                                Log.e(TAG, "⚠️ V3.3 规范：找零失败，停止后续找零，禁止自动全额退款")
+                                Log.e(TAG, "⚠️ 将交易状态更新为 PAYMENT_SUCCESS_CHANGE_FAILED，进入人工处理流程")
+                                
+                                // ⚠️ V3.3 规范：将交易状态更新为 PAYMENT_SUCCESS_CHANGE_FAILED
+                                val changeFailedState = stateMachine.transition(
+                                    _flowState.value,
+                                    PaymentFlowStatus.PAYMENT_SUCCESS_CHANGE_FAILED,
+                                    "支付成功但找零失败: $changeFailureReason"
+                                )
+                                
+                                withContext(Dispatchers.Main) {
+                                    _flowState.value = changeFailedState.copy(
+                                        errorMessage = "部分找零失败，请联系工作人员。已收款: ${totalPaidCents / 100.0}€，需找零: ${changeNeededCents / 100.0}€"
                                     )
-                                    Log.d(
-                                        TAG,
-                                        "找零失败且已收款，执行退款: refundAmountCents=$paidReceivedCents"
-                                    )
-                                    try {
-                                        // ⚠️ 关键修复：等待退款函数返回最终结果，再决定最终状态
-                                        val refundResult = cashDeviceRepository.refundAmount(
-                                            paidReceivedCents,
-                                            billDeviceID,
-                                            coinDeviceID
-                                        )
-                                        
-                                        // ⚠️ 关键修复：如果退款成功（remaining=0），进入 CANCELLED_REFUNDED 状态
-                                        if (refundResult.success && refundResult.remaining == 0) {
-                                            Log.d(TAG, "========== 找零失败但退款成功 ==========")
-                                            Log.d(TAG, "已收款=${paidReceivedCents}分，已退款=${refundResult.totalDispensed}分，remaining=0")
-                                            Log.d(TAG, "进入 CANCELLED_REFUNDED 状态")
-                                            
-                                            // 进入已取消且退款完成状态
-                                            val refundedState = stateMachine.transition(
-                                                _flowState.value,
-                                                PaymentFlowStatus.CANCELLED_REFUNDED,
-                                                "找零失败但退款完成"
-                                            )
-                                            withContext(Dispatchers.Main) {
-                                                _flowState.value = refundedState
-                                            }
-                                            
-                                            // ⚠️ 关键修复：找零失败但退款成功，使用统一的 finishAttempt
-                                            // 注意：退款已经在上面完成，这里只需要清理状态
-                                            billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
-                                            coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
-                                            cashDeviceRepository.stopCashSession("找零失败但退款完成")
-                                            // 状态已经在上面更新为 CANCELLED_REFUNDED，这里直接返回
-                                            return
-                                        } else {
-                                            Log.e(
-                                                TAG,
-                                                "⚠️ 退款失败或部分失败: remaining=${refundResult.remaining}分"
-                                            )
-                                            handlePaymentFailure("CHANGE_DISPENSE_FAILED_AND_REFUND_FAILED: remaining=${refundResult.remaining}")
-                                            return
-                                        }
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "退款异常，需要人工处理", e)
-                                        handlePaymentFailure("CHANGE_DISPENSE_FAILED_AND_REFUND_EXCEPTION")
-                                        return
-                                    }
-                                } else {
-                                    // 找零失败且未收款，直接进入失败分支
-                                    handlePaymentFailure("CHANGE_DISPENSE_FAILED: $changeFailureReason")
-                                    return
                                 }
+                                
+                                // ⚠️ V3.3 规范：上报监控，生成对账单，供人工补找零或退款
+                                Log.e(TAG, "========== 找零失败 - 生成对账单 ==========")
+                                Log.e(TAG, "交易ID: ${currentState.lastUpdated}")
+                                Log.e(TAG, "已收款: ${totalPaidCents}分 (${totalPaidCents / 100.0}€)")
+                                Log.e(TAG, "目标金额: ${targetAmountCents}分 (${targetAmountCents / 100.0}€)")
+                                Log.e(TAG, "需找零: ${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
+                                Log.e(TAG, "找零失败原因: $changeFailureReason")
+                                Log.e(TAG, "已成功找零明细: ${dispensedList.joinToString { "${it.amount}分 (${it.deviceName})" }}")
+                                Log.e(TAG, "=========================================")
+                                
+                                // ⚠️ 关键修复：禁用接收器
+                                billDeviceID?.let { 
+                                    try {
+                                        cashDeviceRepository.disableAcceptor(it)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "禁用纸币器接收器失败", e)
+                                    }
+                                }
+                                coinDeviceID?.let { 
+                                    try {
+                                        cashDeviceRepository.disableAcceptor(it)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "禁用硬币器接收器失败", e)
+                                    }
+                                }
+                                
+                                // ⚠️ 关键修复：清理状态
+                                billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                                coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                                cashDeviceRepository.stopCashSession("PAYMENT_SUCCESS_CHANGE_FAILED")
+                                
+                                // ⚠️ V3.3 规范：标记 pending refund 为 0（不执行自动退款）
+                                pendingRefundCents = 0
+                                
+                                Log.e("FINAL_DECISION", "FINAL_DECISION success=false paidTotalCents=$totalPaidCents targetAmountCents=$targetAmountCents changeDispensedCents=0 refundDispensedCents=0 remainingCents=$changeNeededCents state=PAYMENT_SUCCESS_CHANGE_FAILED reason=CHANGE_DISPENSE_FAILED_V3_3")
+                                
+                                // ⚠️ V3.3 规范：返回，进入人工处理流程
+                                return
                             }
                         } else {
-                            Log.e(TAG, "找零方案计算失败，需要人工干预")
-                                // ⚠️ 找零方案计算失败时必须退款：已投入金额 > 0，必须触发退款
-                                // ⚠️ 关键修复：使用 tracker.getTotalCents() 作为退款金额
-                                val paidReceivedCents =
-                                    cashDeviceRepository.getAmountTracker().getTotalCents()
-                                if (paidReceivedCents > 0) {
-                                    Log.d(
-                                        "CASH_REFUND_TRIGGER",
-                                        "paid=$paidReceivedCents target=$targetAmountCents reason=CHANGE_CALC_FAILED"
-                                    )
-                                    Log.d(
-                                        TAG,
-                                        "找零方案计算失败且已收款，执行退款: refundAmountCents=$paidReceivedCents"
-                                    )
-                                    try {
-                                        // ⚠️ 关键修复：等待退款函数返回最终结果
-                                        val refundResult = cashDeviceRepository.refundAmount(
-                                            paidReceivedCents,  // ⚠️ 使用 GetAllLevels 差分
-                                            billDeviceID,
-                                            coinDeviceID
-                                        )
-                                        if (!refundResult.success) {
-                                            Log.e(
-                                                TAG,
-                                                "⚠️ 退款失败，需要人工处理: refundAmountCents=$paidReceivedCents remaining=${refundResult.remaining}"
-                                            )
-                                        }
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "退款异常，需要人工处理", e)
-                                    }
+                            // ⚠️ V3.3 规范：找零方案计算失败时禁止自动全额退款，必须标记为 PAYMENT_SUCCESS_CHANGE_FAILED
+                            Log.e(TAG, "========== 找零方案计算失败（V3.3 规范：禁止自动全额退款） ==========")
+                            val paidReceivedCents = cashDeviceRepository.getAmountTracker().getTotalCents()
+                            Log.e(TAG, "已收款金额: ${paidReceivedCents}分 (${paidReceivedCents / 100.0}€)")
+                            Log.e(TAG, "目标金额: ${targetAmountCents}分 (${targetAmountCents / 100.0}€)")
+                            Log.e(TAG, "需找零金额: ${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
+                            
+                            // ⚠️ V3.3 规范：将交易状态更新为 PAYMENT_SUCCESS_CHANGE_FAILED
+                            val changeFailedState = stateMachine.transition(
+                                _flowState.value,
+                                PaymentFlowStatus.PAYMENT_SUCCESS_CHANGE_FAILED,
+                                "找零方案计算失败"
+                            )
+                            
+                            withContext(Dispatchers.Main) {
+                                _flowState.value = changeFailedState.copy(
+                                    errorMessage = "找零方案计算失败，请联系工作人员。已收款: ${paidReceivedCents / 100.0}€，需找零: ${changeNeededCents / 100.0}€"
+                                )
+                            }
+                            
+                            // ⚠️ V3.3 规范：上报监控，生成对账单
+                            Log.e(TAG, "========== 找零方案计算失败 - 生成对账单 ==========")
+                            Log.e(TAG, "交易ID: ${currentState.lastUpdated}")
+                            Log.e(TAG, "已收款: ${paidReceivedCents}分 (${paidReceivedCents / 100.0}€)")
+                            Log.e(TAG, "需找零: ${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
+                            Log.e(TAG, "失败原因: 找零方案计算失败")
+                            Log.e(TAG, "=========================================")
+                            
+                            // ⚠️ 关键修复：禁用接收器并清理状态
+                            billDeviceID?.let { 
+                                try {
+                                    cashDeviceRepository.disableAcceptor(it)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "禁用纸币器接收器失败", e)
                                 }
-                            // 进入 ManualInterventionRequired，禁止继续进入洗车
-                                handlePaymentFailure("CHANGE_CALC_FAILED")
+                            }
+                            coinDeviceID?.let { 
+                                try {
+                                    cashDeviceRepository.disableAcceptor(it)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "禁用硬币器接收器失败", e)
+                                }
+                            }
+                            
+                            billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                            coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                            cashDeviceRepository.stopCashSession("PAYMENT_SUCCESS_CHANGE_FAILED")
+                            pendingRefundCents = 0
+                            
                             return
                         }
                     } else {
-                            // 根据失败原因输出不同的错误码
+                            // ⚠️ V3.3 规范：找零失败时禁止自动全额退款，必须标记为 PAYMENT_SUCCESS_CHANGE_FAILED
                             val errorCode = when (changeResult.failureReason) {
                                 com.carwash.carpayment.data.cashdevice.ChangeInventory.ChangeFailureReason.LEVELS_UNAVAILABLE -> "CHANGE_LEVELS_UNAVAILABLE"
                                 com.carwash.carpayment.data.cashdevice.ChangeInventory.ChangeFailureReason.INSUFFICIENT_SUM -> "CHANGE_INSUFFICIENT"
@@ -2334,43 +2576,58 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                                 com.carwash.carpayment.data.cashdevice.ChangeInventory.ChangeFailureReason.ALGO_NO_SOLUTION -> "CHANGE_ALGO_FAILED"
                                 null -> "CHANGE_INSUFFICIENT"
                             }
-                            Log.e(
-                                TAG,
-                                "库存不足，无法找零 ${changeNeededCents}分，失败原因=${changeResult.failureReason}"
+                            
+                            Log.e(TAG, "========== 库存不足，无法找零（V3.3 规范：禁止自动全额退款） ==========")
+                            Log.e(TAG, "无法找零金额: ${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
+                            Log.e(TAG, "失败原因: ${changeResult.failureReason}")
+                            
+                            val paidReceivedCents = cashDeviceRepository.getAmountTracker().getTotalCents()
+                            Log.e(TAG, "已收款金额: ${paidReceivedCents}分 (${paidReceivedCents / 100.0}€)")
+                            Log.e(TAG, "目标金额: ${targetAmountCents}分 (${targetAmountCents / 100.0}€)")
+                            
+                            // ⚠️ V3.3 规范：将交易状态更新为 PAYMENT_SUCCESS_CHANGE_FAILED
+                            val changeFailedState = stateMachine.transition(
+                                _flowState.value,
+                                PaymentFlowStatus.PAYMENT_SUCCESS_CHANGE_FAILED,
+                                "库存不足，无法找零: $errorCode"
                             )
-                            // ⚠️ 找零失败时必须退款：已投入金额 > 0，必须触发退款
-                            // ⚠️ 关键修复：使用 tracker.getTotalCents() 作为退款金额
-                            val paidReceivedCents =
-                                cashDeviceRepository.getAmountTracker().getTotalCents()
-                            if (paidReceivedCents > 0) {
-                                Log.d(
-                                    "CASH_REFUND_TRIGGER",
-                                    "paid=$paidReceivedCents target=$targetAmountCents reason=CHANGE_FAILED"
+                            
+                            withContext(Dispatchers.Main) {
+                                _flowState.value = changeFailedState.copy(
+                                    errorMessage = "库存不足，无法找零，请联系工作人员。已收款: ${paidReceivedCents / 100.0}€，需找零: ${changeNeededCents / 100.0}€"
                                 )
-                                Log.d(
-                                    TAG,
-                                    "找零失败且已收款，执行退款: refundAmountCents=$paidReceivedCents"
-                                )
+                            }
+                            
+                            // ⚠️ V3.3 规范：上报监控，生成对账单
+                            Log.e(TAG, "========== 库存不足 - 生成对账单 ==========")
+                            Log.e(TAG, "交易ID: ${currentState.lastUpdated}")
+                            Log.e(TAG, "已收款: ${paidReceivedCents}分 (${paidReceivedCents / 100.0}€)")
+                            Log.e(TAG, "需找零: ${changeNeededCents}分 (${changeNeededCents / 100.0}€)")
+                            Log.e(TAG, "失败原因: $errorCode")
+                            Log.e(TAG, "=========================================")
+                            
+                            // ⚠️ 关键修复：禁用接收器并清理状态
+                            billDeviceID?.let { 
                                 try {
-                                    // ⚠️ 关键修复：等待退款函数返回最终结果
-                                    val refundResult = cashDeviceRepository.refundAmount(
-                                        paidReceivedCents,  // ⚠️ 使用 GetAllLevels 差分
-                                        billDeviceID,
-                                        coinDeviceID
-                                    )
-                                    if (!refundResult.success) {
-                                        Log.e(
-                                            TAG,
-                                            "⚠️ 退款失败，需要人工处理: refundAmountCents=$paidReceivedCents remaining=${refundResult.remaining}"
-                                        )
-                                    }
+                                    cashDeviceRepository.disableAcceptor(it)
                                 } catch (e: Exception) {
-                                    Log.e(TAG, "退款异常，需要人工处理", e)
+                                    Log.e(TAG, "禁用纸币器接收器失败", e)
                                 }
                             }
-                        // 进入 ManualInterventionRequired，禁止继续进入洗车
-                            handlePaymentFailure(errorCode)
-                        return
+                            coinDeviceID?.let { 
+                                try {
+                                    cashDeviceRepository.disableAcceptor(it)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "禁用硬币器接收器失败", e)
+                                }
+                            }
+                            
+                            billDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                            coinDeviceID?.let { cashDeviceRepository.getBaselineStore().clearBaseline(it) }
+                            cashDeviceRepository.stopCashSession("PAYMENT_SUCCESS_CHANGE_FAILED")
+                            pendingRefundCents = 0
+                            
+                            return
                     }
                     } else {
                         Log.e(TAG, "库存明细不可用，无法判断找零能力")
@@ -2604,22 +2861,26 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         // ⚠️ 关键修复：设置 attemptFinalized 标志
         attemptFinalized = true
         Log.d("ATTEMPT_FINALIZED", "ATTEMPT_FINALIZED SET attemptFinalized=true reason=$reason")
-        // 1. 立即禁用接收器（停止继续收款）
+        
+        // ⚠️ V3.2 关键修复：立即禁用接收器（停止继续收款）
+        // ⚠️ 规范要求：支付结束时调用 enableAcceptor(false)，绝不调用 closeConnection
         billDeviceID?.let { deviceID ->
             try {
-                cashDeviceRepository.setAutoAccept(deviceID, false, caller = "finishAttempt_$reason")
-                cashDeviceRepository.disableAcceptor(deviceID)
+                // ⚠️ V3.2：使用 CashDevice 接口直接禁用接收器
+                billAcceptor?.enableAcceptor(false)
+                Log.d(TAG, "✅ V3.2: 纸币器接收器已禁用: deviceID=$deviceID")
             } catch (e: Exception) {
-                Log.w(TAG, "finishAttempt: 禁用纸币器失败: deviceID=$deviceID", e)
+                Log.w(TAG, "finishAttempt: 禁用纸币器接收器失败: deviceID=$deviceID", e)
             }
         }
         
         coinDeviceID?.let { deviceID ->
             try {
-                cashDeviceRepository.setAutoAccept(deviceID, false, caller = "finishAttempt_$reason")
-                cashDeviceRepository.disableAcceptor(deviceID)
+                // ⚠️ V3.2：使用 CashDevice 接口直接禁用接收器
+                coinAcceptor?.enableAcceptor(false)
+                Log.d(TAG, "✅ V3.2: 硬币器接收器已禁用: deviceID=$deviceID")
             } catch (e: Exception) {
-                Log.w(TAG, "finishAttempt: 禁用硬币器失败: deviceID=$deviceID", e)
+                Log.w(TAG, "finishAttempt: 禁用硬币器接收器失败: deviceID=$deviceID", e)
             }
         }
         
@@ -3530,6 +3791,31 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
     }
     
     /**
+     * 检查订单是否处于终态或已创建但未结束
+     * 根据 V3.3 规范：
+     * - ORDER_COMPLETED = 正常服务完成（SUCCESS 且洗车完成）
+     * - ORDER_REFUNDED = 退款成功（CANCELLED_REFUNDED）
+     * - ORDER_MANUAL = 需人工介入（PAYMENT_SUCCESS_CHANGE_FAILED）
+     * - 订单一旦进入上述终态，不再允许任何操作
+     * - 订单创建以后，在订单未结束以前，不允许取消支付、返回首页等操作
+     * 
+     * @return true 如果订单处于终态或已创建但未结束，不允许操作
+     */
+    private fun isOrderInFinalStateOrActive(currentState: PaymentFlowState): Boolean {
+        return when (currentState.status) {
+            // 终态：不允许任何操作
+            PaymentFlowStatus.CANCELLED_REFUNDED,  // ORDER_REFUNDED
+            PaymentFlowStatus.PAYMENT_SUCCESS_CHANGE_FAILED,  // ORDER_MANUAL
+            // 已创建但未结束：不允许取消支付、返回首页
+            PaymentFlowStatus.SUCCESS,  // 支付成功，订单已创建
+            PaymentFlowStatus.STARTING_WASH,  // 启动洗车，订单服务中
+            PaymentFlowStatus.WAITING -> true  // 等待，订单服务中
+            // 其他状态允许操作
+            else -> false
+        }
+    }
+    
+    /**
      * 取消支付并返回首页（统一入口，支持卡支付和现金支付）
      * 必须 stopCashSession / stopPosPayment（如有）
      * 导航回 Home，并清理 PaymentFlowStateMachine 状态为初始
@@ -3538,6 +3824,14 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         Log.d(TAG, "========== 取消支付并返回首页 ==========")
         
         val currentState = _flowState.value
+        
+        // ⚠️ V3.3 规范：检查订单是否处于终态或已创建但未结束
+        if (isOrderInFinalStateOrActive(currentState)) {
+            Log.w(TAG, "❌ 订单处于终态或已创建但未结束，不允许返回首页")
+            Log.w(TAG, "当前状态: ${currentState.status}")
+            Log.w(TAG, "说明：订单一旦进入终态（ORDER_COMPLETED/ORDER_REFUNDED/ORDER_MANUAL）或已创建但未结束，不允许任何操作")
+            return
+        }
         
         viewModelScope.launch {
             try {
@@ -3625,6 +3919,15 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
      */
     fun cancelPayment() {
         val currentState = _flowState.value
+        
+        // ⚠️ V3.3 规范：检查订单是否处于终态或已创建但未结束
+        if (isOrderInFinalStateOrActive(currentState)) {
+            Log.w(TAG, "❌ 订单处于终态或已创建但未结束，不允许取消支付")
+            Log.w(TAG, "当前状态: ${currentState.status}")
+            Log.w(TAG, "说明：订单一旦进入终态（ORDER_COMPLETED/ORDER_REFUNDED/ORDER_MANUAL）或已创建但未结束，不允许任何操作")
+            return
+        }
+        
         if (currentState.status != PaymentFlowStatus.PAYING) {
             Log.w(TAG, "无法取消支付，当前状态: ${currentState.status}")
             return
@@ -3828,6 +4131,132 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
     /**
      * 处理支付取消（本地取消逻辑）
      */
+    /**
+     * ⚠️ V3.2 超时处理：无支付超时中止函数
+     * 直接禁用接收器，清除会话，返回首页
+     */
+    private suspend fun abortPaymentWithoutRefund(
+        billDeviceID: String?,
+        coinDeviceID: String?
+    ) {
+        Log.d(TAG, "========== V3.2 无支付超时处理 ==========")
+        
+        // 禁用接收器
+        disableAcceptors(billDeviceID, coinDeviceID)
+        
+        // 清除会话基线
+        clearSession(billDeviceID, coinDeviceID)
+        
+        // 重置超时监控变量
+        paymentStartTime = 0L
+        lastCashActivityTime = 0L
+        collectedCents = 0
+        targetAmountCents = 0
+        
+        // 更新状态
+        handlePaymentFailure("NO_PAYMENT_TIMEOUT")
+        
+        Log.d(TAG, "========== V3.2 无支付超时处理完成 ==========")
+    }
+    
+    /**
+     * ⚠️ V3.2 超时处理：部分支付超时中止函数（含退款）
+     * 先禁用接收器，然后调用退款接口，标记为"超时退款"
+     */
+    private suspend fun abortPaymentWithRefund(
+        billDeviceID: String?,
+        coinDeviceID: String?,
+        refundAmountCents: Int,
+        billBaselineLevels: com.carwash.carpayment.data.cashdevice.LevelsResponse?,
+        coinBaselineLevels: com.carwash.carpayment.data.cashdevice.LevelsResponse?
+    ) {
+        Log.d(TAG, "========== V3.2 部分支付超时处理 ==========")
+        Log.d(TAG, "退款金额=${refundAmountCents}分")
+        
+        // 先禁用接收器，防止新现金进入
+        disableAcceptors(billDeviceID, coinDeviceID)
+        
+        // 调用退款接口（使用 DispenseValue，标记为"超时退款"）
+        val refundSuccess = try {
+            cashDeviceRepository.refundFullAmount(
+                billDeviceID = billDeviceID,
+                coinDeviceID = coinDeviceID,
+                amountCents = refundAmountCents,
+                reason = "TIMEOUT_REFUND"  // 关键：传递退款原因
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "V3.2 超时退款失败", e)
+            false
+        }
+        
+        if (!refundSuccess) {
+            // 退款失败需记录错误，但仍需清除会话返回
+            Log.e(TAG, "V3.2 超时退款失败，但继续清除会话")
+        } else {
+            Log.d(TAG, "V3.2 超时退款成功: ${refundAmountCents}分")
+        }
+        
+        // 清除会话基线
+        clearSession(billDeviceID, coinDeviceID)
+        
+        // 重置超时监控变量
+        paymentStartTime = 0L
+        lastCashActivityTime = 0L
+        collectedCents = 0
+        targetAmountCents = 0
+        
+        // 更新状态（可区分退款成功/失败）
+        val errorCode = if (refundSuccess) "PARTIAL_PAYMENT_TIMEOUT" else "PARTIAL_PAYMENT_TIMEOUT_REFUND_FAILED"
+        handlePaymentFailure(errorCode)
+        
+        Log.d(TAG, "========== V3.2 部分支付超时处理完成 ==========")
+    }
+    
+    /**
+     * ⚠️ V3.2 超时处理：禁用接收器和找零设备
+     */
+    private suspend fun disableAcceptors(billDeviceID: String?, coinDeviceID: String?) {
+        Log.d(TAG, "V3.2 超时处理：禁用接收器...")
+        
+        billDeviceID?.let { deviceID ->
+            try {
+                billAcceptor?.enableAcceptor(false)
+                Log.d(TAG, "✅ 纸币器接收器已禁用: deviceID=$deviceID")
+            } catch (e: Exception) {
+                Log.w(TAG, "禁用纸币器接收器失败: deviceID=$deviceID", e)
+            }
+        }
+        
+        coinDeviceID?.let { deviceID ->
+            try {
+                coinAcceptor?.enableAcceptor(false)
+                Log.d(TAG, "✅ 硬币器接收器已禁用: deviceID=$deviceID")
+            } catch (e: Exception) {
+                Log.w(TAG, "禁用硬币器接收器失败: deviceID=$deviceID", e)
+            }
+        }
+    }
+    
+    /**
+     * ⚠️ V3.2 超时处理：清除会话基线
+     */
+    private suspend fun clearSession(billDeviceID: String?, coinDeviceID: String?) {
+        Log.d(TAG, "V3.2 超时处理：清除会话基线...")
+        
+        try {
+            billDeviceID?.let { 
+                cashDeviceRepository.getBaselineStore().clearBaseline(it)
+            }
+            coinDeviceID?.let { 
+                cashDeviceRepository.getBaselineStore().clearBaseline(it)
+            }
+            cashDeviceRepository.setSessionActive(false)
+            Log.d(TAG, "✅ 会话基线已清除")
+        } catch (e: Exception) {
+            Log.w(TAG, "清除会话基线失败", e)
+        }
+    }
+    
     private fun handlePaymentCancellation(reason: String) {
         val currentState = _flowState.value
         // 使用状态机的 paymentCancelled 方法

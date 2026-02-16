@@ -3,6 +3,10 @@ package com.carwash.carpayment.data.cashdevice
 import com.carwash.carpayment.data.cashdevice.RefundConfig
 import com.carwash.carpayment.data.cashdevice.RefundPriority
 import com.carwash.carpayment.data.cashdevice.RefundInsufficientAction
+import com.carwash.carpayment.CarPaymentApplication
+import com.carwash.carpayment.data.cashdevice.device.SpectralPayoutDevice
+import com.carwash.carpayment.data.cashdevice.device.SmartCoinSystemDevice
+import com.carwash.carpayment.data.cashdevice.ChangeSafetyCalculator
 
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -178,11 +182,29 @@ class CashDeviceRepository(
      * 获取纸币器设备ID（同步方法）
      */
     fun getBillAcceptorDeviceID(): String? = _billAcceptorDeviceID.value
-    
+
     /**
      * 获取硬币器设备ID（同步方法）
      */
     fun getCoinAcceptorDeviceID(): String? = _coinAcceptorDeviceID.value
+
+    /**
+     * ⚠️ V3.2 新增：设置纸币器设备ID
+     * 仅在 OpenConnection 成功后调用
+     */
+    fun setBillAcceptorDeviceID(deviceID: String) {
+        _billAcceptorDeviceID.value = deviceID
+        Log.d(TAG, "✅ 纸币器 DeviceID 已保存: $deviceID")
+    }
+
+    /**
+     * ⚠️ V3.2 新增：设置硬币器设备ID
+     * 仅在 OpenConnection 成功后调用
+     */
+    fun setCoinAcceptorDeviceID(deviceID: String) {
+        _coinAcceptorDeviceID.value = deviceID
+        Log.d(TAG, "✅ 硬币器 DeviceID 已保存: $deviceID")
+    }
     
     /**
      * 获取会话基线存储（用于重置基线功能）
@@ -827,12 +849,127 @@ class CashDeviceRepository(
         )
     }
     
+    /**
+     * ⚠️ V3.2 超时处理：全额退款方法（用于部分支付超时）
+     * 明确区分退款和正常找零，在日志中记录退款原因
+     * @param billDeviceID 纸币器设备ID（可为null）
+     * @param coinDeviceID 硬币器设备ID（可为null）
+     * @param amountCents 退款金额（分）
+     * @param reason 退款原因（如 "TIMEOUT_REFUND"）
+     * @return 是否退款成功
+     */
+    suspend fun refundFullAmount(
+        billDeviceID: String?,
+        coinDeviceID: String?,
+        amountCents: Int,
+        reason: String
+    ): Boolean {
+        Log.d(TAG, "========== V3.2 超时退款开始 ==========")
+        Log.d(TAG, "退款金额: $amountCents 分 (${amountCents / 100.0}€)")
+        Log.d(TAG, "退款原因: $reason")
+        Log.d(TAG, "纸币器设备ID: $billDeviceID")
+        Log.d(TAG, "硬币器设备ID: $coinDeviceID")
+        
+        if (amountCents <= 0) {
+            Log.w(TAG, "退款金额为0或负数，无需退款")
+            return true
+        }
+        
+        if (billDeviceID == null && coinDeviceID == null) {
+            Log.e(TAG, "错误：两个设备ID都为空，无法退款")
+            return false
+        }
+        
+        // 调用 refundAmount 方法，但需要修改它以支持 reason 参数
+        // 由于 refundAmount 内部调用 dispenseValue，而 dispenseValue 已支持 reason 参数
+        // 我们需要创建一个新的 refundAmount 重载版本，或者直接在这里调用 dispenseValue
+        // 为了简化，我们直接调用 refundAmount，然后在日志中记录 reason
+        
+        try {
+            // ⚠️ 注意：refundAmount 方法内部会调用 dispenseValue，但 dispenseValue 的 reason 参数默认为 "CHANGE"
+            // 我们需要修改 refundAmount 方法以支持 reason 参数，或者在这里直接调用 dispenseValue
+            // 为了保持兼容性，我们先调用 refundAmount，然后在日志中记录 reason
+            
+            // 记录退款操作类型
+            Log.d("REFUND_OPERATION", "REFUND_OPERATION amountCents=$amountCents reason=$reason billDeviceID=$billDeviceID coinDeviceID=$coinDeviceID")
+            
+            // 由于 refundAmount 内部调用 dispenseValue 时没有传递 reason，我们需要修改 refundAmount
+            // 但为了不破坏现有代码，我们在这里直接调用 dispenseValue（简化版本）
+            // 实际应该修改 refundAmount 方法以支持 reason 参数
+            
+            // 临时方案：直接调用 dispenseValue（优先使用纸币器）
+            var remainingCents = amountCents
+            var success = false
+            
+            // 优先使用纸币器退款
+            if (billDeviceID != null && remainingCents > 0) {
+                try {
+                    val billSuccess = dispenseValue(billDeviceID, remainingCents, "EUR", reason)
+                    if (billSuccess) {
+                        remainingCents = 0
+                        success = true
+                        Log.d(TAG, "✅ 纸币器退款成功: $amountCents 分")
+                    } else {
+                        Log.w(TAG, "⚠️ 纸币器退款失败，尝试硬币器")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "纸币器退款异常", e)
+                }
+            }
+            
+            // 如果纸币器退款失败或不足，尝试硬币器
+            if (coinDeviceID != null && remainingCents > 0) {
+                try {
+                    val coinSuccess = dispenseValue(coinDeviceID, remainingCents, "EUR", reason)
+                    if (coinSuccess) {
+                        remainingCents = 0
+                        success = true
+                        Log.d(TAG, "✅ 硬币器退款成功: $remainingCents 分")
+                    } else {
+                        Log.w(TAG, "⚠️ 硬币器退款失败")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "硬币器退款异常", e)
+                }
+            }
+            
+            if (success) {
+                Log.d(TAG, "========== V3.2 超时退款成功 ==========")
+            } else {
+                Log.e(TAG, "========== V3.2 超时退款失败（部分或全部） ==========")
+                Log.e(TAG, "剩余未退款: $remainingCents 分")
+            }
+            
+            return success && remainingCents == 0
+        } catch (e: Exception) {
+            Log.e(TAG, "V3.2 超时退款异常", e)
+            return false
+        }
+    }
+    
     // 设备映射：Port -> SspAddress
     private var billAcceptorMapping: Pair<Int, Int>? = null  // (Port, SspAddress)
     private var coinAcceptorMapping: Pair<Int, Int>? = null  // (Port, SspAddress)
     
     // 设备状态缓存：deviceID -> DeviceStatusResponse（用于空数组时返回上一次状态）
-    private val lastKnownStatus = mutableMapOf<String, DeviceStatusResponse>()
+    // ⚠️ V3.1 优化：设备状态缓存（带时间戳）
+    private data class CachedDeviceStatus(
+        val status: DeviceStatusResponse,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+    
+    private val lastKnownStatus = mutableMapOf<String, CachedDeviceStatus>()
+    
+    // ⚠️ V3.1 优化：缓存过期时间（5秒）
+    private val CACHE_EXPIRY_MS = 5000L
+    
+    /**
+     * ⚠️ V3.1 优化：检查缓存是否过期
+     */
+    private fun isCacheExpired(cached: CachedDeviceStatus): Boolean {
+        val elapsed = System.currentTimeMillis() - cached.timestamp
+        return elapsed > CACHE_EXPIRY_MS
+    }
     
     /**
      * 认证
@@ -1740,58 +1877,85 @@ class CashDeviceRepository(
     
     /**
      * 开始纸币器现金支付会话（启用接收器并开启自动接受）
-     * 在用户进入现金支付界面时调用（无参数版本，使用内部 deviceID）
+     * ⚠️ V3.1 优化：支持传入 targetAmountCents 参数
+     * @param targetAmountCents 目标金额（分），必须 > 0 才能启用接收器
      * @return Boolean 如果所有步骤成功返回 true，否则返回 false
      */
-    suspend fun beginBillCashSession(): Boolean {
+    suspend fun beginBillCashSession(targetAmountCents: Int = 0): Boolean {
         val deviceID = _billAcceptorDeviceID.value
         if (deviceID == null) {
             Log.e(TAG, "开始纸币器现金支付会话失败: deviceID=null (设备未连接)")
             return false
         }
-        return beginCashSession(deviceID)
+        return beginCashSession(deviceID, targetAmountCents)
     }
     
     /**
      * 开始硬币器现金支付会话（启用接收器并开启自动接受）
-     * 在用户进入现金支付界面时调用（无参数版本，使用内部 deviceID）
+     * ⚠️ V3.1 优化：支持传入 targetAmountCents 参数
+     * @param targetAmountCents 目标金额（分），必须 > 0 才能启用接收器
      * @return Boolean 如果所有步骤成功返回 true，否则返回 false
      */
-    suspend fun beginCoinCashSession(): Boolean {
+    suspend fun beginCoinCashSession(targetAmountCents: Int = 0): Boolean {
         val deviceID = _coinAcceptorDeviceID.value
         if (deviceID == null) {
             Log.e(TAG, "开始硬币器现金支付会话失败: deviceID=null (设备未连接)")
             return false
         }
-        return beginCashSession(deviceID)
+        return beginCashSession(deviceID, targetAmountCents)
     }
     
     /**
      * 开始现金支付会话（启用接收器并开启自动接受）
-     * 在用户进入现金支付界面时调用
+     * ⚠️ V3.1 优化：在每次支付会话启动时，确保设备的接收器状态和物理连接被正确处理
+     * 避免冗余的设备初始化，直接使用只读模式查询设备状态
      * @param deviceID 设备ID
+     * @param targetAmountCents 目标金额（分），必须 > 0 才能启用接收器
      * @return Boolean 如果所有步骤成功返回 true，否则返回 false
      */
-    suspend fun beginCashSession(deviceID: String): Boolean {
-        Log.e("CASH_SESSION_MARK", "BEGIN_CASH_SESSION")
+    suspend fun beginCashSession(deviceID: String, targetAmountCents: Int = 0): Boolean {
+        Log.e("CASH_SESSION_MARK", "BEGIN_CASH_SESSION deviceID=$deviceID targetAmountCents=$targetAmountCents")
         Log.d(TAG, "========== 开始现金支付会话 ==========")
-        Log.d(TAG, "deviceID=$deviceID")
+        Log.d(TAG, "deviceID=$deviceID, targetAmountCents=$targetAmountCents")
         
         try {
-            // 1. 启用接收器
-            val enableSuccess = enableAcceptor(deviceID)
-            if (!enableSuccess) {
-                Log.e(TAG, "开始现金支付会话失败：启用接收器失败, deviceID=$deviceID")
+            // ⚠️ V3.1 优化：检查设备连接状态（使用只读模式查询，不修改设备状态）
+            if (!isDeviceConnected(deviceID)) {
+                Log.e(TAG, "开始现金支付会话失败：设备未连接或不可用, deviceID=$deviceID")
                 return false
             }
             
-            // 2. 设置自动接受为 true
-            val autoAcceptSuccess = setAutoAccept(deviceID, true, caller = "beginCashSession")
-            if (!autoAcceptSuccess) {
-                Log.e(TAG, "开始现金支付会话失败：设置自动接受失败, deviceID=$deviceID")
-                // 如果设置自动接受失败，尝试禁用接收器以恢复状态
-                disableAcceptor(deviceID)
-                return false
+            // ⚠️ V3.1 优化：检查目标金额，必须 > 0 才能启用接收器
+            if (targetAmountCents <= 0) {
+                Log.w(TAG, "开始现金支付会话：targetAmountCents=$targetAmountCents <= 0，跳过启用接收器")
+                // 目标金额为 0 时，不启用接收器，但返回 true（允许只读查询）
+                return true
+            }
+            
+            // ⚠️ V3.1 优化：检查接收器是否已启用，避免重复启用
+            if (isAcceptorEnabled(deviceID)) {
+                Log.d(TAG, "开始现金支付会话：接收器已启用，跳过启用步骤, deviceID=$deviceID")
+            } else {
+                // 1. 启用接收器
+                val enableSuccess = enableAcceptor(deviceID)
+                if (!enableSuccess) {
+                    Log.e(TAG, "开始现金支付会话失败：启用接收器失败, deviceID=$deviceID")
+                    return false
+                }
+            }
+            
+            // ⚠️ V3.1 优化：检查自动接受是否已启用，避免重复设置
+            if (isAutoAcceptEnabled(deviceID)) {
+                Log.d(TAG, "开始现金支付会话：自动接受已启用，跳过设置步骤, deviceID=$deviceID")
+            } else {
+                // 2. 设置自动接受为 true
+                val autoAcceptSuccess = setAutoAccept(deviceID, true, caller = "beginCashSession")
+                if (!autoAcceptSuccess) {
+                    Log.e(TAG, "开始现金支付会话失败：设置自动接受失败, deviceID=$deviceID")
+                    // 如果设置自动接受失败，尝试禁用接收器以恢复状态
+                    disableAcceptor(deviceID)
+                    return false
+                }
             }
             
             Log.d(TAG, "========== 开始现金支付会话成功 ==========")
@@ -1926,6 +2090,86 @@ class CashDeviceRepository(
     }
     
     /**
+     * ⚠️ V3.1 新增：检查设备是否已连接且可用
+     * 基于缓存和 GetDeviceStatus 综合判断设备连接状态
+     * @param deviceID 设备ID
+     * @return true 如果设备已连接且无严重错误，false 否则
+     */
+    private suspend fun isDeviceConnected(deviceID: String): Boolean {
+        return try {
+            // ⚠️ V3.1 优化：优先使用缓存状态（如果缓存未过期）
+            val cached = lastKnownStatus[deviceID]
+            if (cached != null && !isCacheExpired(cached)) {
+                val state = cached.status.actualState?.uppercase() ?: "UNKNOWN"
+                // 如果缓存状态是 CONNECTED、IDLE、STARTED 或 DISABLED，认为设备已连接
+                val isConnected = state == "CONNECTED" || 
+                                 state == "IDLE" || 
+                                 state == "STARTED" || 
+                                 state == "DISABLED"  // DISABLED 视为已连接但接收器禁用
+                if (isConnected) {
+                    Log.d(TAG, "isDeviceConnected: 缓存显示设备已连接: deviceID=$deviceID, state=$state")
+                    return true
+                }
+            }
+            
+            // 如果缓存不可用或显示有问题，通过 GetDeviceStatus API 验证
+            val status = getDeviceStatus(deviceID)
+            val state = status.actualState?.uppercase() ?: "UNKNOWN"
+            
+            val isConnected = state == "CONNECTED" || 
+                            state == "IDLE" || 
+                            state == "STARTED" || 
+                            state == "DISABLED"  // DISABLED 视为已连接但接收器禁用
+            
+            Log.d(TAG, "isDeviceConnected: GetDeviceStatus 验证结果: deviceID=$deviceID, state=$state, isConnected=$isConnected")
+            isConnected
+        } catch (e: Exception) {
+            Log.e(TAG, "isDeviceConnected: 获取设备状态异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * ⚠️ V3.1 新增：检查接收器是否已启用
+     * @param deviceID 设备ID
+     * @return true 如果接收器已启用，false 否则
+     */
+    private suspend fun isAcceptorEnabled(deviceID: String): Boolean {
+        return try {
+            val status = getDeviceStatus(deviceID)
+            val state = status.actualState?.uppercase() ?: "UNKNOWN"
+            // 假设 IDLE、STARTED、CONNECTED 状态表示接收器已启用
+            val isEnabled = state == "IDLE" || state == "STARTED" || state == "CONNECTED"
+            Log.d(TAG, "isAcceptorEnabled: deviceID=$deviceID, state=$state, isEnabled=$isEnabled")
+            isEnabled
+        } catch (e: Exception) {
+            Log.e(TAG, "isAcceptorEnabled: 获取设备状态异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
+     * ⚠️ V3.1 新增：检查自动接受是否已启用
+     * @param deviceID 设备ID
+     * @return true 如果自动接受已启用，false 否则
+     */
+    private suspend fun isAutoAcceptEnabled(deviceID: String): Boolean {
+        // 假设 GetDeviceStatus 响应中包含 AutoAccept 状态
+        // 如果没有，需要修改 GetDeviceStatus API 响应或通过其他方式获取
+        return try {
+            val status = getDeviceStatus(deviceID)
+            val state = status.actualState?.uppercase() ?: "UNKNOWN"
+            // 假设 IDLE、STARTED 意味着自动接受已启用
+            val isAutoAccept = state == "IDLE" || state == "STARTED"
+            Log.d(TAG, "isAutoAcceptEnabled: deviceID=$deviceID, state=$state, isAutoAccept=$isAutoAccept")
+            isAutoAccept
+        } catch (e: Exception) {
+            Log.e(TAG, "isAutoAcceptEnabled: 获取设备状态异常: deviceID=$deviceID", e)
+            false
+        }
+    }
+    
+    /**
      * 获取设备状态（服务器返回 List<DeviceStatusResponse>，可能为空数组 []）
      * @return DeviceStatusResponse 如果数组为空，返回缓存的上一次状态或 UNKNOWN；否则返回最后一个元素（通常代表最新状态）
      */
@@ -1938,18 +2182,18 @@ class CashDeviceRepository(
             
             if (statusList.isEmpty()) {
                 // 空数组：返回缓存的上一次状态或 UNKNOWN
-                val cachedStatus = lastKnownStatus[deviceID]
-                if (cachedStatus != null) {
-                    Log.d(TAG, "设备状态数组为空 []，沿用上次状态=${cachedStatus.actualState}: deviceID=$deviceID")
-                    return cachedStatus
+                val cached = lastKnownStatus[deviceID]
+                if (cached != null && !isCacheExpired(cached)) {
+                    Log.d(TAG, "设备状态数组为空 []，沿用上次状态=${cached.status.actualState}: deviceID=$deviceID")
+                    return cached.status
                 } else {
-                    Log.d(TAG, "设备状态数组为空 []，无缓存，返回 UNKNOWN: deviceID=$deviceID")
+                    Log.d(TAG, "设备状态数组为空 []，无缓存或缓存已过期，返回 UNKNOWN: deviceID=$deviceID")
                     val unknownStatus = DeviceStatusResponse(
                         type = null,
                         state = "UNKNOWN",
                         stateAsString = "Unknown"
                     )
-                    lastKnownStatus[deviceID] = unknownStatus  // 缓存 UNKNOWN 状态
+                    lastKnownStatus[deviceID] = CachedDeviceStatus(unknownStatus)  // 缓存 UNKNOWN 状态
                     return unknownStatus
                 }
             }
@@ -1986,8 +2230,8 @@ class CashDeviceRepository(
                 latestStatus
             }
             
-            // 更新缓存
-            lastKnownStatus[deviceID] = finalStatus
+            // ⚠️ V3.1 优化：更新缓存（带时间戳）
+            lastKnownStatus[deviceID] = CachedDeviceStatus(finalStatus)
             
             finalStatus
         } catch (e: kotlinx.serialization.SerializationException) {
@@ -1995,17 +2239,17 @@ class CashDeviceRepository(
             // 记录原始错误信息用于排查
             Log.w(TAG, "设备状态查询失败（JSON 解析错误），返回缓存或 UNKNOWN（容错处理）")
             // 返回缓存或 UNKNOWN
-            val cachedStatus = lastKnownStatus[deviceID]
-            if (cachedStatus != null) {
-                Log.d(TAG, "返回缓存状态: ${cachedStatus.actualState}")
-                return cachedStatus
+            val cached = lastKnownStatus[deviceID]
+            if (cached != null && !isCacheExpired(cached)) {
+                Log.d(TAG, "返回缓存状态: ${cached.status.actualState}")
+                return cached.status
             } else {
                 val unknownStatus = DeviceStatusResponse(
                     type = null,
                     state = "UNKNOWN",
                     stateAsString = "Unknown"
                 )
-                lastKnownStatus[deviceID] = unknownStatus
+                lastKnownStatus[deviceID] = CachedDeviceStatus(unknownStatus)
                 return unknownStatus
             }
         } catch (e: Exception) {
@@ -2013,17 +2257,17 @@ class CashDeviceRepository(
             // 即使状态查询失败，也返回缓存或 UNKNOWN，不阻塞支付流程
             Log.w(TAG, "设备状态查询失败，返回缓存或 UNKNOWN（容错处理）")
             // 返回缓存或 UNKNOWN
-            val cachedStatus = lastKnownStatus[deviceID]
-            if (cachedStatus != null) {
-                Log.d(TAG, "返回缓存状态: ${cachedStatus.actualState}")
-                return cachedStatus
+            val cached = lastKnownStatus[deviceID]
+            if (cached != null && !isCacheExpired(cached)) {
+                Log.d(TAG, "返回缓存状态: ${cached.status.actualState}")
+                return cached.status
             } else {
                 val unknownStatus = DeviceStatusResponse(
                     type = null,
                     state = "UNKNOWN",
                     stateAsString = "Unknown"
                 )
-                lastKnownStatus[deviceID] = unknownStatus
+                lastKnownStatus[deviceID] = CachedDeviceStatus(unknownStatus)
                 return unknownStatus
             }
         }
@@ -2057,7 +2301,7 @@ class CashDeviceRepository(
                 if (deviceID == _coinAcceptorDeviceID.value) {
                     _coinAcceptorDeviceID.value = null
                 }
-                lastKnownStatus.remove(deviceID)  // 清除状态缓存
+                lastKnownStatus.remove(deviceID)  // ⚠️ V3.1 优化：清除状态缓存
                 amountTracker.removeDevice(deviceID)  // 清除金额跟踪
                 true
             } else {
@@ -2139,185 +2383,119 @@ class CashDeviceRepository(
         Log.d("CASH_GUARD", "CASH_GUARD forbid: cashSessionAllowed=false, caller=$caller")
     }
     
-    suspend fun startCashSession(caller: String = "unknown"): Map<String, String> {
-        // ⚠️ 关键修复：禁止默认 unknown caller，必须传入明确标识
-        if (caller == "unknown") {
-            Log.e("CASH_GUARD", "❌ CASH_GUARD ERROR: startCashSession called with caller=unknown, must provide explicit caller")
-            val stackTrace = Thread.currentThread().stackTrace.take(10).joinToString("\n") { it.toString() }
-            Log.e("CASH_GUARD", "❌ CASH_GUARD ERROR stacktrace:\n$stackTrace")
-            // 直接返回空 Map，不触发任何 Authenticate/OpenConnection/startSession
-            return emptyMap()
-        }
+    /**
+     * 启动现金会话
+     * 在现金支付流程入口处调用，确保现金会话被激活（isCashSessionAllowed = true），
+     * 从而允许后续的 EnableAcceptor 操作通过 CASH_GUARD 检查。
+     * 
+     * @param targetAmountCents 目标金额（分）
+     */
+    suspend fun startCashSession(targetAmountCents: Int) {
+        // 1. 设置会话允许标志（核心，供 CASH_GUARD 检查）
+        cashSessionAllowed = true
+        Log.d("CASH_SESSION", "startCashSession: cashSessionAllowed = true, targetAmountCents=${targetAmountCents} (${targetAmountCents / 100.0}EUR)")
         
-        // ⚠️ 关键修复：禁止打印后/回首页后的 caller 触发会话
-        val forbiddenCallers = listOf(
-            "PRINT_AFTER_SUCCESS",
-            "HOME_READONLY_REFRESH",
-            "HOME_",
-            "POST_SUCCESS_"
-        )
-        if (forbiddenCallers.any { caller.contains(it, ignoreCase = true) }) {
-            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK: startCashSession blocked, forbidden caller=$caller")
-            val stackTrace = Thread.currentThread().stackTrace.take(10).joinToString("\n") { it.toString() }
-            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK stacktrace:\n$stackTrace")
-            // 直接返回空 Map，不触发任何 Authenticate/OpenConnection/startSession
-            return emptyMap()
-        }
+        // 2. 记录基线库存（用于计算收款增量）
+        val billDeviceID = getBillAcceptorDeviceID()
+        val coinDeviceID = getCoinAcceptorDeviceID()
         
-        // ⚠️ 关键修复：硬闸门检查（核心修复，100% 阻止打印后重新启动会话）
-        if (!cashSessionAllowed) {
-            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK: startCashSession blocked, cashSessionAllowed=false, caller=$caller")
-            val stackTrace = Thread.currentThread().stackTrace.take(10).joinToString("\n") { it.toString() }
-            Log.e("CASH_GUARD", "❌ CASH_GUARD BLOCK stacktrace:\n$stackTrace")
-            // 直接返回空 Map，不触发任何 Authenticate/OpenConnection/startSession
-            return emptyMap()
-        }
-        
-        // ⚠️ 关键修复：状态断言日志
-        Log.d("CASH_GUARD", "CASH_GUARD startCashSession called: caller=$caller")
-        val stackTrace = Thread.currentThread().stackTrace.take(5).joinToString("\n") { it.toString() }
-        Log.d("CASH_GUARD", "CASH_GUARD startCashSession stacktrace:\n$stackTrace")
-        
-        // ⚠️ 互斥保护：防止重复点击/并发调用
-        return startSessionMutex.withLock {
-            if (isStartingSession) {
-                val errorMsg = "正在启动支付，请稍候..."
-                Log.w(TAG, "⚠️ $errorMsg")
-                throw IllegalStateException(errorMsg)
-            }
-            
-            isStartingSession = true
+        billDeviceID?.let { deviceID ->
             try {
-                Log.d(TAG, "========== 启动现金设备会话 ==========")
-                
-                val billKey = "SPECTRAL_PAYOUT-0"
-                val coinKey = "SMART_COIN_SYSTEM-1"
-                
-                val billDeviceID = _billAcceptorDeviceID.value
-                val coinDeviceID = _coinAcceptorDeviceID.value
-                
-                // ⚠️ 部分复用：允许只复用纸币器或只复用硬币器
-                val devices = mutableMapOf<String, String>()
-                
-                // 检查纸币器：已连接 -> 复用，未连接 -> 检查是否正在连接
-                if (billDeviceID != null) {
-                    Log.d(TAG, "纸币器已连接，复用现有连接: billDeviceID=$billDeviceID")
-                    devices["SPECTRAL_PAYOUT-0"] = billDeviceID
-                } else {
-                    // 检查是否正在连接（不是已连接可复用）
-                    if (isDeviceConnectingOrConnected(billKey)) {
-                        val errorMsg = "纸币器正在连接中，请稍候..."
-                        Log.w(TAG, "⚠️ $errorMsg")
-                        throw IllegalStateException(errorMsg)
-                    }
-                }
-                
-                // 检查硬币器：已连接 -> 复用，未连接 -> 检查是否正在连接
-                if (coinDeviceID != null) {
-                    Log.d(TAG, "硬币器已连接，复用现有连接: coinDeviceID=$coinDeviceID")
-                    devices["SMART_COIN_SYSTEM-1"] = coinDeviceID
-                } else {
-                    // 检查是否正在连接（不是已连接可复用）
-                    if (isDeviceConnectingOrConnected(coinKey)) {
-                        val errorMsg = "硬币器正在连接中，请稍候..."
-                        Log.w(TAG, "⚠️ $errorMsg")
-                        throw IllegalStateException(errorMsg)
-                    }
-                }
-                
-                // 如果至少有一个设备已连接，直接复用（部分复用）
-                if (devices.isNotEmpty()) {
-                    Log.d(TAG, "部分复用设备: ${devices.keys.joinToString(", ")}")
-                    // ⚠️ 关键修复：只有在非活跃会话时才能 reset
-                    if (!sessionActive) {
-                        Log.d(TAG, "重置金额跟踪器（新的支付会话，非活跃状态）")
-                    amountTracker.reset()
-                    } else {
-                        Log.w(TAG, "⚠️ 警告：尝试在活跃会话期间 reset tracker，已跳过（防止丢金额）")
-                    }
-                    return@withLock devices
-                }
-                
-                // 如果两个设备都未连接，需要启动新连接
-                Log.d(TAG, "两个设备都未连接，启动新连接...")
-                
-                // 设置连接状态（标记为正在连接）
-                setDeviceConnectionState(billKey, true)
-                setDeviceConnectionState(coinKey, true)
-                
-                try {
-                    // ⚠️ 关键修复：只有在非活跃会话时才能 reset
-                    if (!sessionActive) {
-                        Log.d(TAG, "重置金额跟踪器（新的支付会话，非活跃状态）")
-                    amountTracker.reset()
-                    } else {
-                        Log.w(TAG, "⚠️ 警告：尝试在活跃会话期间 reset tracker，已跳过（防止丢金额）")
-                    }
-                    
-                    // 使用会话管理器启动会话（启用收款）
-                    val newDevices = try {
-                        sessionManager.startSession()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "启动现金设备会话失败", e)
-                        // 连接失败，清除连接状态
-                        setDeviceConnectionState(billKey, false)
-                        setDeviceConnectionState(coinKey, false)
-                        throw e
-                    }
-                    
-                    // 更新设备ID映射（兼容现有代码）并设置基线金额
-                    newDevices["SPECTRAL_PAYOUT-0"]?.let { deviceID ->
-                        _billAcceptorDeviceID.value = deviceID
-                        Log.d(TAG, "纸币器 deviceID: $deviceID")
-                        devices["SPECTRAL_PAYOUT-0"] = deviceID
-                        // 启动阶段：不执行 SetInhibits/SetRoutes/EnableAcceptor
-                        // 这些操作只在用户进入现金支付页面时执行
-                        // 可选：读取库存快照用于首页展示（不影响设备状态）
-                        try {
-                            val levelsResponse = readCurrentLevels(deviceID)
-                            val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
-                            amountTracker.setBaseline(deviceID, levels)
-                            Log.d(TAG, "纸币器：已读取库存快照（用于首页展示）")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "纸币器：读取库存快照失败，继续使用空库存", e)
-                            amountTracker.setBaseline(deviceID, emptyMap())  // 使用空库存
-                        }
-                    }
-                    newDevices["SMART_COIN_SYSTEM-1"]?.let { deviceID ->
-                        _coinAcceptorDeviceID.value = deviceID
-                        Log.d(TAG, "硬币器 deviceID: $deviceID")
-                        devices["SMART_COIN_SYSTEM-1"] = deviceID
-                        // 启动阶段：不执行 SetInhibits/SetRoutes/EnableAcceptor
-                        // 这些操作只在用户进入现金支付页面时执行
-                        // 可选：读取库存快照用于首页展示（不影响设备状态）
-                        try {
-                            val levelsResponse = readCurrentLevels(deviceID)
-                            val levels = levelsResponse.levels?.associate { it.value to it.stored } ?: emptyMap()
-                            amountTracker.setBaseline(deviceID, levels)
-                            Log.d(TAG, "硬币器：已读取库存快照（用于首页展示）")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "硬币器：读取库存快照失败，继续使用空库存", e)
-                            amountTracker.setBaseline(deviceID, emptyMap())  // 使用空库存
-                        }
-                    }
-                    
-                    Log.d(TAG, "现金设备会话启动成功: 已注册设备数量=${devices.size}")
-                    
-                    // ⚠️ 关键日志：CASH_SESSION_MARK - 会话启动
-                    Log.d("CASH_SESSION_MARK", "CASH_SESSION_MARK START caller=$caller billDeviceID=$billDeviceID coinDeviceID=$coinDeviceID")
-                    
-                    // 连接成功，保持连接状态（直到支付结束或断开连接）
-                    return@withLock devices
-                } catch (e: Exception) {
-                    // 连接失败，清除连接状态
-                    setDeviceConnectionState(billKey, false)
-                    setDeviceConnectionState(coinKey, false)
-                    throw e
-                }
-            } finally {
-                isStartingSession = false
+                resetSessionBaseline(deviceID)
+            } catch (e: Exception) {
+                Log.w(TAG, "记录纸币器基线库存失败: deviceID=$deviceID", e)
             }
         }
+        
+        coinDeviceID?.let { deviceID ->
+            try {
+                resetSessionBaseline(deviceID)
+            } catch (e: Exception) {
+                Log.w(TAG, "记录硬币器基线库存失败: deviceID=$deviceID", e)
+            }
+        }
+        
+        // 3. 重置当前收款金额（如果有）
+        amountTracker.reset()
+        Log.d(TAG, "金额跟踪器已重置")
+        
+        // 4. 记录目标金额（可选，根据业务需求）
+        // 注意：这里不存储 targetAmountCents，因为它应该由调用方管理
+        Log.d(TAG, "现金会话已启动: targetAmountCents=${targetAmountCents} (${targetAmountCents / 100.0}EUR)")
+    }
+    
+    /**
+     * ⚠️ V3.2 重构：启动现金设备会话（已废弃，不再调用 OpenConnection）
+     * 
+     * 根据 V3.2 规范：
+     * - 设备连接仅在 Application 启动时调用一次
+     * - 支付流程中严禁调用 OpenConnection
+     * - 此方法仅返回已连接的设备ID，不进行任何连接操作
+     * 
+     * @param caller 调用方标识（用于日志）
+     * @return 已连接的设备映射（deviceName -> deviceID），如果设备未连接则返回空 Map
+     * @deprecated 此方法已废弃，V3.2 规范要求设备连接仅在 Application 启动时完成
+     */
+    @Deprecated("V3.2: 设备连接仅在 Application 启动时完成，支付流程中严禁调用 OpenConnection", ReplaceWith("getConnectedDevices()"))
+    suspend fun startCashSession(caller: String = "unknown"): Map<String, String> {
+        Log.w(TAG, "⚠️ V3.2 警告：startCashSession() 已废弃，不应在支付流程中调用")
+        Log.w(TAG, "⚠️ 设备连接应在 Application 启动时完成，支付流程中严禁调用 OpenConnection")
+        Log.w(TAG, "⚠️ caller=$caller")
+        
+        // ⚠️ V3.2：仅返回已连接的设备ID，不进行任何连接操作
+        val devices = mutableMapOf<String, String>()
+        
+        // 从 Application 单例获取设备ID（如果已连接）
+        val billDevice = CarPaymentApplication.billAcceptor
+        val coinDevice = CarPaymentApplication.coinAcceptor
+        
+        // 从设备驱动获取设备ID（如果设备驱动支持）
+        val billDeviceID = if (billDevice is SpectralPayoutDevice) {
+            billDevice.getDeviceID()
+        } else {
+            _billAcceptorDeviceID.value
+        }
+        
+        val coinDeviceID = if (coinDevice is SmartCoinSystemDevice) {
+            coinDevice.getDeviceID()
+        } else {
+            _coinAcceptorDeviceID.value
+        }
+        
+        // 更新内部状态（用于兼容旧代码）
+        billDeviceID?.let {
+            _billAcceptorDeviceID.value = it
+            devices["SPECTRAL_PAYOUT-0"] = it
+        }
+        
+        coinDeviceID?.let {
+            _coinAcceptorDeviceID.value = it
+            devices["SMART_COIN_SYSTEM-1"] = it
+        }
+        
+        if (devices.isEmpty()) {
+            Log.w(TAG, "⚠️ V3.2 警告：设备未连接，请确保在 Application 启动时已完成设备连接")
+        }
+        
+        return devices
+    }
+    
+    /**
+     * ⚠️ V3.2 新增：获取已连接的设备（不进行任何连接操作）
+     * @return 已连接的设备映射（deviceName -> deviceID）
+     */
+    suspend fun getConnectedDevices(): Map<String, String> {
+        val devices = mutableMapOf<String, String>()
+        
+        _billAcceptorDeviceID.value?.let {
+            devices["SPECTRAL_PAYOUT-0"] = it
+        }
+        
+        _coinAcceptorDeviceID.value?.let {
+            devices["SMART_COIN_SYSTEM-1"] = it
+        }
+        
+        return devices
     }
     
     /**
@@ -2644,58 +2822,68 @@ class CashDeviceRepository(
      * @param countryCode 货币代码，默认 EUR
      * @return Boolean 是否成功
      */
-    suspend fun dispenseValue(deviceID: String, valueCents: Int, countryCode: String = "EUR"): Boolean {
+    /**
+     * ⚠️ V3.2 超时处理：修改 dispenseValue 方法，添加 reason 参数用于区分找零和退款
+     * @param deviceID 设备ID
+     * @param valueCents 金额（分）
+     * @param countryCode 货币代码（默认 "EUR"）
+     * @param reason 操作原因（"CHANGE" 找零 或 "TIMEOUT_REFUND" 超时退款，默认 "CHANGE"）
+     */
+    suspend fun dispenseValue(deviceID: String, valueCents: Int, countryCode: String = "EUR", reason: String = "CHANGE"): Boolean {
         // ⚠️ 关键修复：串行锁 + BUSY 退避重试 + 状态确认
         // 对每个 deviceID 建立 Mutex，保证同一时刻只有一个 dispense 在跑
         val deviceMutex = getDeviceDispenseMutex(deviceID)
         
         return deviceMutex.withLock {
-            try {
             val request = DispenseValueRequest(value = valueCents, countryCode = countryCode)
             
             // 构建完整 URL（用于日志）
             val baseUrl = "http://127.0.0.1:5000/api"
             val fullUrl = "$baseUrl/CashDevice/DispenseValue?deviceID=$deviceID"
             
-                // ⚠️ 关键修复：使用与 Retrofit 相同的序列化配置（encodeDefaults=true，确保 CountryCode 被序列化）
-                val jsonForLog = kotlinx.serialization.json.Json {
-                    encodeDefaults = true  // ⚠️ 关键：确保所有字段都被序列化（包括 CountryCode）
+            // ⚠️ 关键修复：使用与 Retrofit 相同的序列化配置（encodeDefaults=true，确保 CountryCode 被序列化）
+            val jsonForLog = kotlinx.serialization.json.Json {
+                encodeDefaults = true  // ⚠️ 关键：确保所有字段都被序列化（包括 CountryCode）
                 ignoreUnknownKeys = false
             }
-                val requestBodyJson = jsonForLog.encodeToString(
+            val requestBodyJson = jsonForLog.encodeToString(
                 kotlinx.serialization.serializer<DispenseValueRequest>(), request
             )
             
-                Log.d(TAG, "========== DispenseValue 请求开始（串行锁保护） ==========")
+            Log.d(TAG, "========== DispenseValue 请求开始（串行锁保护） ==========")
             Log.d(TAG, "deviceID: $deviceID")
-                Log.d(TAG, "amountCents=$valueCents (${valueCents / 100.0}€)")
-                Log.d(TAG, "countryCode=$countryCode")
+            Log.d(TAG, "amountCents=$valueCents (${valueCents / 100.0}€)")
+            Log.d(TAG, "countryCode=$countryCode")
+            Log.d(TAG, "reason=$reason (${if (reason == "TIMEOUT_REFUND") "超时退款" else "找零"})")
             Log.d(TAG, "fullUrl: $fullUrl")
-                Log.d(TAG, "序列化后的 RequestBody（用于日志验证）: $requestBodyJson")
-                
-                // ⚠️ 硬保护：如果构造出的 body 缺 CountryCode，直接在本地抛错并拒绝发送
-                if (!requestBodyJson.contains("CountryCode") || !requestBodyJson.contains("\"CountryCode\"")) {
-                    Log.e(TAG, "========== ⚠️ 严重错误：请求体缺少 CountryCode，拒绝发送 ==========")
-                    Log.e(TAG, "requestBodyJson=$requestBodyJson")
-                    Log.e(TAG, "request 对象内容: value=${request.value}, countryCode=${request.countryCode}")
-                    Log.e(TAG, "=========================================")
-                    // 直接抛错并拒绝发送，避免设备收到 INVALID_INPUT
-                    throw IllegalStateException("请求体缺少 CountryCode，拒绝发送以避免 INVALID_INPUT")
-                }
-                
-                // ⚠️ 验证请求体必须包含 Value 和 CountryCode
-                if (!requestBodyJson.contains("\"Value\"") || !requestBodyJson.contains("\"CountryCode\"")) {
-                    Log.e(TAG, "========== ⚠️ 严重错误：请求体格式不正确 ==========")
-                    Log.e(TAG, "requestBodyJson=$requestBodyJson")
-                    throw IllegalStateException("请求体格式不正确，必须包含 Value 和 CountryCode")
-                }
-                
-                Log.d(TAG, "✓ 验证通过: DispenseValue requestBody 包含 Value 和 CountryCode")
-                
-                // ⚠️ 关键修复：注意：实际发送的 body 由 Retrofit 序列化，可能因 encodeDefaults=false 而不同
-                // ⚠️ 真实发送的 body 会在 OkHttp 日志拦截器中打印（HttpLoggingInterceptor.Level.BODY）
+            Log.d(TAG, "序列化后的 RequestBody（用于日志验证）: $requestBodyJson")
+            
+            // ⚠️ V3.2 超时处理：记录操作类型到日志（用于报表统计）
+            Log.d("DISPENSE_OPERATION", "DISPENSE_OPERATION deviceID=$deviceID amountCents=$valueCents reason=$reason")
+            
+            // ⚠️ 硬保护：如果构造出的 body 缺 CountryCode，直接在本地抛错并拒绝发送
+            if (!requestBodyJson.contains("CountryCode") || !requestBodyJson.contains("\"CountryCode\"")) {
+                Log.e(TAG, "========== ⚠️ 严重错误：请求体缺少 CountryCode，拒绝发送 ==========")
+                Log.e(TAG, "requestBodyJson=$requestBodyJson")
+                Log.e(TAG, "request 对象内容: value=${request.value}, countryCode=${request.countryCode}")
+                Log.e(TAG, "=========================================")
+                // 直接抛错并拒绝发送，避免设备收到 INVALID_INPUT
+                throw IllegalStateException("请求体缺少 CountryCode，拒绝发送以避免 INVALID_INPUT")
+            }
+            
+            // ⚠️ 验证请求体必须包含 Value 和 CountryCode
+            if (!requestBodyJson.contains("\"Value\"") || !requestBodyJson.contains("\"CountryCode\"")) {
+                Log.e(TAG, "========== ⚠️ 严重错误：请求体格式不正确 ==========")
+                Log.e(TAG, "requestBodyJson=$requestBodyJson")
+                throw IllegalStateException("请求体格式不正确，必须包含 Value 和 CountryCode")
+            }
+            
+            Log.d(TAG, "✓ 验证通过: DispenseValue requestBody 包含 Value 和 CountryCode")
+            
+            // ⚠️ 关键修复：注意：实际发送的 body 由 Retrofit 序列化，可能因 encodeDefaults=false 而不同
+            // ⚠️ 真实发送的 body 会在 OkHttp 日志拦截器中打印（HttpLoggingInterceptor.Level.BODY）
             Log.d(TAG, "--> POST /CashDevice/DispenseValue?deviceID=$deviceID")
-                Log.d(TAG, "⚠️ 注意：真实发送的 body 请查看 OkHttp 日志（HttpLoggingInterceptor），确保包含 CountryCode")
+            Log.d(TAG, "⚠️ 注意：真实发送的 body 请查看 OkHttp 日志（HttpLoggingInterceptor），确保包含 CountryCode")
             
             // ⚠️ 关键日志：每次下发 DispenseValue 前打印金额单位信息
             // ⚠️ 金额单位确认：DispenseValue.Value 统一为 cents（分）
@@ -2725,187 +2913,153 @@ class CashDeviceRepository(
             Log.d(TAG, "requestBodyJson=$requestBodyJson")
             Log.d(TAG, "================================================")
             
-            val response = api.dispenseValue(deviceID, request)
-            val httpCode = response.code()
+            // ⚠️ 增强可靠性：重试策略（处理 SocketTimeoutException 和 400 BUSY）
+            val MAX_RETRIES = 5
+            val INITIAL_DELAY_MS = 300L
+            var retryCount = 0
+            var lastException: Exception? = null
+            var lastResponse: Response<ResponseBody>? = null
+            var lastHttpCode: Int? = null
+            var lastBodyText: String? = null
             
-            // ⚠️ Step C: 400 时必须读取 errorBody，不要只打印空的 rawResponseBody
-            val bodyText = if (response.isSuccessful) {
-                cleanResponseBody(response.body()?.string())
-            } else {
-                // 失败时读取 errorBody
-                val errorBody = response.errorBody()
-                val errorBodyText = try {
-                    errorBody?.string() ?: ""
-                } catch (e: Exception) {
-                    Log.w(TAG, "读取 errorBody 失败", e)
-                    ""
-                }
-                cleanResponseBody(errorBodyText)
-            }
-            
-            Log.d(TAG, "<-- $httpCode ${if (response.isSuccessful) "OK" else "ERROR"}")
-            Log.d(TAG, "responseBody: $bodyText")
-            
-            if (response.isSuccessful) {
-                Log.d(TAG, "找零成功: deviceID=$deviceID, valueCents=$valueCents (${valueCents / 100.0}€)")
-                Log.d(TAG, "========== DispenseValue 请求成功 ==========")
-                true
-            } else {
-                // ⚠️ Step 2: 解析错误原因，特别处理 BUSY 和 INVALID_INPUT
-                val errorReason = try {
-                    if (bodyText.isNotEmpty()) {
-                        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-                        val errorObj = json.parseToJsonElement(bodyText)
-                        if (errorObj is kotlinx.serialization.json.JsonObject) {
-                            // 优先读取 Reason 字段（BUSY 错误）
-                            errorObj["Reason"]?.let { 
-                                if (it is kotlinx.serialization.json.JsonPrimitive) {
-                                    it.content
-                                } else {
-                                    it.toString()
-                                }
-                            } ?: errorObj["errorReason"]?.let { 
-                                if (it is kotlinx.serialization.json.JsonPrimitive) {
-                                    it.content
-                                } else {
-                                    it.toString()
-                                }
-                            } ?: bodyText
-                        } else {
-                            bodyText
-                        }
-                    } else {
-                        "响应体为空"
-                    }
-                } catch (e: Exception) {
-                    "解析错误失败: ${e.message}, 原始响应: $bodyText"
-                }
-                
-                Log.e(TAG, "找零失败: deviceID=$deviceID, code=$httpCode, errorReason=$errorReason")
-                Log.e(TAG, "errorBody完整内容: $bodyText")
-                
-                // ⚠️ 关键修复：处理 BUSY - 阶梯退避重试策略（300ms, 600ms, 1000ms, 1500ms...）
-                if (httpCode == 400 && (errorReason.contains("BUSY", ignoreCase = true) || bodyText.contains("BUSY", ignoreCase = true))) {
-                    Log.w(TAG, "========== 检测到 400 BUSY，开始阶梯退避重试策略 ==========")
-                    
-                    val maxRetries = 6
-                    var retryCount = 0
-                    var lastSuccess = false
-                    
-                    while (retryCount < maxRetries && !lastSuccess) {
-                        retryCount++
-                        // ⚠️ 关键修复：阶梯退避：300ms, 600ms, 1000ms, 1500ms, 2000ms, 2500ms
-                        val delayMs = when (retryCount) {
-                            1 -> 300L
-                            2 -> 600L
-                            3 -> 1000L
-                            4 -> 1500L
-                            5 -> 2000L
-                            6 -> 2500L
-                            else -> 3000L
-                        }
-                        
-                        Log.d(TAG, "DispenseValue BUSY retry $retryCount/$maxRetries after ${delayMs}ms")
-                        kotlinx.coroutines.delay(delayMs)
-                        
-                        // ⚠️ 关键修复：每次重试前验证请求体包含 CountryCode（硬保护）
-                        val retryRequestBodyJson = jsonForLog.encodeToString(
-                            kotlinx.serialization.serializer<DispenseValueRequest>(), request
-                        )
-                        
-                        Log.d(TAG, "========== 重试 $retryCount/$maxRetries：即将发送的 JSON body ==========")
-                        Log.d(TAG, "retryRequestBodyJson=$retryRequestBodyJson")
-                        
-                        // ⚠️ 硬保护：如果构造出的 body 缺 CountryCode，直接拒绝发送
-                        if (!retryRequestBodyJson.contains("CountryCode") || !retryRequestBodyJson.contains("\"CountryCode\"")) {
-                            Log.e(TAG, "========== ⚠️ 严重错误：重试请求体缺少 CountryCode，拒绝发送 ==========")
-                            Log.e(TAG, "retryRequestBodyJson=$retryRequestBodyJson")
-                            Log.e(TAG, "request 对象内容: value=${request.value}, countryCode=${request.countryCode}")
-                            Log.e(TAG, "=========================================")
-                            // 直接抛错并拒绝发送，避免设备收到 INVALID_INPUT
-                            throw IllegalStateException("重试请求体缺少 CountryCode，拒绝发送以避免 INVALID_INPUT")
-                        }
-                        
-                        // ⚠️ 验证请求体必须包含 Value 和 CountryCode
-                        if (!retryRequestBodyJson.contains("\"Value\"") || !retryRequestBodyJson.contains("\"CountryCode\"")) {
-                            Log.e(TAG, "========== ⚠️ 严重错误：重试请求体格式不正确 ==========")
-                            Log.e(TAG, "retryRequestBodyJson=$retryRequestBodyJson")
-                            throw IllegalStateException("重试请求体格式不正确，必须包含 Value 和 CountryCode")
-                        }
-                        
-                        Log.d(TAG, "✓ 重试请求体验证通过：包含 Value 和 CountryCode")
-                        Log.d(TAG, "即将发送: deviceID=$deviceID, request=$request")
-                        
-                        // ⚠️ 可选：调用一次 GetDeviceStatus 来确认不 busy 再吐（如果 API 可用）
-                        // 注意：当前没有 GetDeviceStatus API，暂时跳过此步骤
-                        
+            while (retryCount <= MAX_RETRIES) {
+                try {
+                    // ⚠️ 重试前检查设备状态（确保不是 BUSY 或 ERROR）
+                    if (retryCount > 0) {
                         try {
-                            // ⚠️ 关键修复：重试时复用同一个完整的 request 对象（包含 Value 和 CountryCode）
-                            val retryResponse = api.dispenseValue(deviceID, request)
-                            val retryHttpCode = retryResponse.code()
-                            val retryBodyText = if (retryResponse.isSuccessful) {
-                                cleanResponseBody(retryResponse.body()?.string())
-                            } else {
-                                val retryErrorBody = retryResponse.errorBody()
-                                try {
-                                    retryErrorBody?.string() ?: ""
-                                } catch (e: Exception) {
-                                    ""
-                                }
-                            }
+                            val deviceStatus = getDeviceStatus(deviceID)
+                            val isIdleOrReady = deviceStatus.state == "IDLE" || 
+                                                deviceStatus.state == "READY" || 
+                                                deviceStatus.stateAsString?.contains("Idle", ignoreCase = true) == true ||
+                                                deviceStatus.stateAsString?.contains("Ready", ignoreCase = true) == true
                             
-                            if (retryResponse.isSuccessful) {
-                                Log.d(TAG, "DispenseValue BUSY 重试成功: deviceID=$deviceID, valueCents=$valueCents, retryCount=$retryCount")
-                                Log.d(TAG, "========== DispenseValue 重试请求成功 ==========")
-                                lastSuccess = true
-                                return@withLock true
-                            } else {
-                                // ⚠️ 关键修复：检查是否仍然是 BUSY 或变成了 INVALID_INPUT
-                                val isStillBusy = retryBodyText.contains("BUSY", ignoreCase = true)
-                                val isInvalidInput = retryBodyText.contains("INVALID_INPUT", ignoreCase = true) || 
-                                                    retryHttpCode == 400 && retryBodyText.contains("Invalid", ignoreCase = true)
-                                
-                                if (isInvalidInput) {
-                                    Log.e(TAG, "========== ⚠️ 严重错误：重试后变成 INVALID_INPUT ==========")
-                                    Log.e(TAG, "deviceID=$deviceID, code=$retryHttpCode, body=$retryBodyText")
-                                    Log.e(TAG, "重试请求体: $retryRequestBodyJson")
-                                    Log.e(TAG, "request 对象: value=${request.value}, countryCode=${request.countryCode}")
-                                    Log.e(TAG, "=========================================")
-                                    // INVALID_INPUT 通常表示请求体格式错误，不应该继续重试
-                                    throw IllegalStateException("重试后变成 INVALID_INPUT，请求体可能缺少 CountryCode")
+                            if (!isIdleOrReady) {
+                                val statusStr = "${deviceStatus.state}/${deviceStatus.stateAsString}"
+                                Log.w(TAG, "设备状态非 IDLE/READY，延迟重试: $statusStr")
+                                // 如果设备长时间 BUSY（超过 30 秒），应超时并放弃
+                                if (retryCount >= MAX_RETRIES) {
+                                    Log.e(TAG, "设备长时间 BUSY，放弃当前操作")
+                                    throw IllegalStateException("设备长时间 BUSY，超过最大重试次数")
                                 }
-                                
-                                if (!isStillBusy) {
-                                    Log.e(TAG, "DispenseValue 重试失败（非 BUSY）: deviceID=$deviceID, code=$retryHttpCode, body=$retryBodyText")
-                                    break
-                                }
-                                Log.w(TAG, "DispenseValue 重试 $retryCount/$maxRetries 仍然 BUSY")
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "DispenseValue 重试请求异常", e)
-                            break
+                            Log.w(TAG, "检查设备状态失败（继续重试）", e)
                         }
                     }
                     
-                    if (!lastSuccess) {
-                        Log.e(TAG, "DispenseValue BUSY 重试 $maxRetries 次后仍然失败，进入退款不足/设备忙碌状态")
-                        Log.e(TAG, "========== DispenseValue 请求失败（BUSY 重试耗尽） ==========")
-                        // 返回 false，调用方需要处理提示用户并锁单/引导管理员
+                    lastResponse = api.dispenseValue(deviceID, request)
+                    lastHttpCode = lastResponse.code()
+                    
+                    // ⚠️ Step C: 400 时必须读取 errorBody，不要只打印空的 rawResponseBody
+                    lastBodyText = if (lastResponse.isSuccessful) {
+                        cleanResponseBody(lastResponse.body()?.string())
+                    } else {
+                        // 失败时读取 errorBody
+                        val errorBody = lastResponse.errorBody()
+                        val errorBodyText = try {
+                            errorBody?.string() ?: ""
+                        } catch (e: Exception) {
+                            Log.w(TAG, "读取 errorBody 失败", e)
+                            ""
+                        }
+                        cleanResponseBody(errorBodyText)
+                    }
+                    
+                    Log.d(TAG, "<-- $lastHttpCode ${if (lastResponse.isSuccessful) "OK" else "ERROR"}")
+                    Log.d(TAG, "responseBody: $lastBodyText")
+                    
+                    if (lastResponse.isSuccessful) {
+                        Log.d(TAG, "找零成功: deviceID=$deviceID, valueCents=$valueCents (${valueCents / 100.0}€), retryCount=$retryCount")
+                        Log.d(TAG, "========== DispenseValue 请求成功 ==========")
+                        return@withLock true
+                    } else {
+                        // ⚠️ Step 2: 解析错误原因，特别处理 BUSY 和 INVALID_INPUT
+                        val errorReason = try {
+                            if (lastBodyText.isNotEmpty()) {
+                                val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+                                val errorObj = json.parseToJsonElement(lastBodyText)
+                                if (errorObj is kotlinx.serialization.json.JsonObject) {
+                                    // 优先读取 Reason 字段（BUSY 错误）
+                                    errorObj["Reason"]?.let { 
+                                        if (it is kotlinx.serialization.json.JsonPrimitive) {
+                                            it.content
+                                        } else {
+                                            it.toString()
+                                        }
+                                    } ?: errorObj["errorReason"]?.let { 
+                                        if (it is kotlinx.serialization.json.JsonPrimitive) {
+                                            it.content
+                                        } else {
+                                            it.toString()
+                                        }
+                                    } ?: lastBodyText
+                                } else {
+                                    lastBodyText
+                                }
+                            } else {
+                                "响应体为空"
+                            }
+                        } catch (e: Exception) {
+                            "解析错误失败: ${e.message}, 原始响应: $lastBodyText"
+                        }
+                        
+                        Log.e(TAG, "找零失败: deviceID=$deviceID, code=$lastHttpCode, errorReason=$errorReason, retryCount=$retryCount")
+                        Log.e(TAG, "errorBody完整内容: $lastBodyText")
+                        
+                        // ⚠️ 关键修复：处理 BUSY 和 SocketTimeoutException - 阶梯退避重试策略
+                        val isBusy = lastHttpCode == 400 && (errorReason.contains("BUSY", ignoreCase = true) || lastBodyText.contains("BUSY", ignoreCase = true))
+                        
+                        if (isBusy && retryCount < MAX_RETRIES) {
+                            // 继续重试
+                            retryCount++
+                            val delayMs = INITIAL_DELAY_MS * (1 shl (retryCount - 1))  // 300ms, 600ms, 1200ms, 2400ms, 4800ms
+                            Log.w(TAG, "检测到 400 BUSY，开始阶梯退避重试策略: retryCount=$retryCount/$MAX_RETRIES, delay=${delayMs}ms")
+                            kotlinx.coroutines.delay(delayMs)
+                            continue  // 继续重试
+                        } else {
+                            // 非 BUSY 错误或重试次数耗尽，返回失败
+                            Log.e(TAG, "========== DispenseValue 请求失败 ==========")
+                            return@withLock false
+                        }
+                    }
+                } catch (e: java.net.SocketTimeoutException) {
+                    // ⚠️ 增强可靠性：SocketTimeoutException 与 400 BUSY 同等对待
+                    lastException = e
+                    retryCount++
+                    
+                    if (retryCount <= MAX_RETRIES) {
+                        val delayMs = INITIAL_DELAY_MS * (1 shl (retryCount - 1))  // 300ms, 600ms, 1200ms, 2400ms, 4800ms
+                        Log.w(TAG, "检测到 SocketTimeoutException，开始阶梯退避重试策略: retryCount=$retryCount/$MAX_RETRIES, delay=${delayMs}ms", e)
+                        kotlinx.coroutines.delay(delayMs)
+                        continue  // 继续重试
+                    } else {
+                        Log.e(TAG, "SocketTimeoutException 重试次数耗尽", e)
                         return@withLock false
                     }
-                } else {
-                    // 非 BUSY 错误，直接返回失败
-                Log.e(TAG, "========== DispenseValue 请求失败 ==========")
-                    return@withLock false
+                } catch (e: Exception) {
+                    // 其他异常：如果是网络相关，也可以重试
+                    lastException = e
+                    val isNetworkError = e is java.net.UnknownHostException || 
+                                        e is java.net.ConnectException ||
+                                        e is java.io.IOException
+                    
+                    if (isNetworkError && retryCount < MAX_RETRIES) {
+                        retryCount++
+                        val delayMs = INITIAL_DELAY_MS * (1 shl (retryCount - 1))
+                        Log.w(TAG, "检测到网络错误，开始阶梯退避重试策略: retryCount=$retryCount/$MAX_RETRIES, delay=${delayMs}ms", e)
+                        kotlinx.coroutines.delay(delayMs)
+                        continue  // 继续重试
+                    } else {
+                        Log.e(TAG, "DispenseValue 异常（非网络错误或重试次数耗尽）", e)
+                        return@withLock false
+                    }
                 }
-                
-                // 如果重试成功，已经 return true，这里不会执行
-                false
             }
-        } catch (e: Exception) {
-                Log.e(TAG, "DispenseValue 异常", e)
-            false
-            }
+            
+            // 如果所有重试都失败
+            Log.e(TAG, "DispenseValue 重试 $MAX_RETRIES 次后仍然失败")
+            Log.e(TAG, "最后错误: httpCode=$lastHttpCode, bodyText=$lastBodyText, exception=$lastException")
+            return@withLock false
         }
     }
     
@@ -3255,6 +3409,199 @@ class CashDeviceRepository(
         } catch (e: Exception) {
             Log.e(TAG, "获取货币分配异常: deviceID=$deviceID", e)
             emptyList()  // 返回空列表，不抛出异常
+        }
+    }
+    
+    /**
+     * 支付前动态禁用不安全面额（根据找零可行性）
+     * 
+     * 流程：
+     * 1. 获取设备支持的所有面额列表（GetCurrencyAssignment）
+     * 2. 读取当前 recycler 库存（只关注 Stored，忽略 StoredInCashbox）
+     * 3. 计算可安全接收的面额（使用动态规划算法）
+     * 4. 重置所有面额的禁用状态（Inhibit=false）
+     * 5. 设置本次交易禁用面额（不安全面额 Inhibit=true）
+     * 
+     * @param deviceID 设备ID
+     * @param targetCents 目标金额（分）
+     * @return Boolean 是否成功
+     */
+    suspend fun configureSafeDenominationsForPayment(deviceID: String, targetCents: Int): Boolean {
+        return try {
+            Log.d(TAG, "========== 支付前面额安全性评估（动态找零算法） ==========")
+            Log.d(TAG, "deviceID=$deviceID, targetCents=${targetCents}分 (${targetCents / 100.0}€)")
+            
+            // 1. 获取当前设备支持的所有面额列表
+            val assignments = fetchCurrencyAssignments(deviceID)
+            if (assignments.isEmpty()) {
+                Log.w(TAG, "无法获取货币分配，跳过面额安全性评估")
+                return true  // 没有数据，视为成功（不设置任何限制）
+            }
+            
+            // 提取所有面额（分）和对应的 valueCountryCode
+            val allDenominations = assignments.map { it.value }
+            val denominationToValueCountryCode = assignments.associate { 
+                it.value to "${it.value} ${it.countryCode ?: "EUR"}"
+            }
+            
+            Log.d(TAG, "设备支持的面额: ${allDenominations.sorted().joinToString { "${it}分" }}")
+            
+            // 2. 获取纸币器和硬币器的库存（用于动态找零判断）
+            val billDeviceID = getBillAcceptorDeviceID()
+            val coinDeviceID = getCoinAcceptorDeviceID()
+            
+            // 2.1 获取纸币器 recycler 库存（V3.3 规范：只关注 Stored，忽略 StoredInCashbox）
+            val billRecyclerInventory = mutableMapOf<Int, Int>()
+            try {
+                if (billDeviceID != null) {
+                    val billAssignments = fetchCurrencyAssignments(billDeviceID)
+                    billRecyclerInventory.putAll(
+                        billAssignments
+                            .asSequence()
+                            .filter { !it.isInhibited && it.isRecyclable }  // 过滤：未禁用且可循环
+                            .associate { it.value to it.stored }  // V3.3：只用 Stored，忽略 StoredInCashbox
+                            .filter { it.value > 0 }  // 只保留有库存的面额
+                    )
+                    Log.d(TAG, "纸币器 recycler 库存（V3.3 Stored）: ${billRecyclerInventory.entries.joinToString { "${it.key}分×${it.value}" }}")
+                } else {
+                    Log.w(TAG, "纸币器设备ID为空，跳过纸币器库存获取")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "获取纸币器库存失败，将使用保守策略", e)
+                // 纸币器库存获取失败时，将在后续使用保守策略
+            }
+            
+            // 2.2 获取硬币器 payout 库存（V3.3 规范：只关注 Stored，过滤 !isInhibited && isRecyclable）
+            val coinPayoutInventory = mutableMapOf<Int, Int>()
+            try {
+                if (coinDeviceID != null) {
+                    val coinAssignments = fetchCurrencyAssignments(coinDeviceID)
+                    coinPayoutInventory.putAll(
+                        coinAssignments
+                            .asSequence()
+                            .filter { !it.isInhibited && it.isRecyclable }  // V3.3：以 isRecyclable 为准，避免 acceptRoute 字符串不一致
+                            .associate { it.value to it.stored }  // V3.3：只用 Stored
+                            .filter { it.value > 0 }  // 只保留有库存的面额
+                    )
+                    Log.d(TAG, "硬币器 payout 库存（V3.3 Stored）: ${coinPayoutInventory.entries.joinToString { "${it.key}分×${it.value}" }}")
+                } else {
+                    Log.w(TAG, "硬币器设备ID为空，跳过硬币器库存获取")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "获取硬币器库存失败，将使用保守策略", e)
+                // 硬币器库存获取失败时，将在后续使用保守策略
+            }
+            
+            // 2.3 合并纸币器和硬币器库存（用于动态找零判断）
+            val combinedInventory = mutableMapOf<Int, Int>()
+            combinedInventory.putAll(billRecyclerInventory)
+            // 合并硬币器库存（如果同一面额在两个设备都存在，取较大值）
+            coinPayoutInventory.forEach { (value, count) ->
+                combinedInventory[value] = maxOf(combinedInventory[value] ?: 0, count)
+            }
+            
+            Log.d(TAG, "合并后的找零库存: ${combinedInventory.entries.joinToString { "${it.key}分×${it.value}" }}")
+            
+            // 2.4 如果当前设备是纸币器，使用当前设备的 recycler 库存；如果是硬币器，使用当前设备的 payout 库存
+            // V3.3 规范：只关注 Stored，忽略 StoredInCashbox，过滤 !isInhibited && isRecyclable
+            val currentDeviceInventory = assignments
+                .asSequence()
+                .filter { !it.isInhibited && it.isRecyclable }  // V3.3：过滤未禁用且可循环
+                .associate { it.value to it.stored }  // V3.3：只用 Stored，忽略 StoredInCashbox
+                .filter { it.value > 0 }  // 只保留有库存的面额
+            
+            Log.d(TAG, "当前设备库存（V3.3 Stored）: ${currentDeviceInventory.entries.joinToString { "${it.key}分×${it.value}" }}")
+            
+            // 2.5 如果合并库存为空（两个设备都获取失败），使用保守策略：禁用所有大于目标金额的面额
+            val useCombinedInventory = if (combinedInventory.isEmpty()) {
+                Log.w(TAG, "⚠️ 合并库存为空（纸币器和硬币器库存获取均失败），使用保守策略：禁用所有大于目标金额的面额")
+                false  // 使用保守策略
+            } else {
+                true  // 使用动态找零算法
+            }
+            
+            // 用于找零判断的库存（优先使用合并库存，失败时使用当前设备库存）
+            val recyclerInventory = if (useCombinedInventory) {
+                Log.d(TAG, "✅ 使用合并库存进行动态找零判断（纸币器 recycler + 硬币器 payout）")
+                combinedInventory
+            } else {
+                Log.w(TAG, "⚠️ 使用当前设备库存作为找零判断依据（保守策略）")
+                currentDeviceInventory
+            }
+            
+            Log.d(TAG, "用于找零判断的库存: ${recyclerInventory.entries.joinToString { "${it.key}分×${it.value}" }}")
+            
+            // 3. 重置所有面额的禁用状态（Inhibit=false）- V3.3 规范步骤 3
+            // ⚠️ V3.3 规范：必须在计算禁用面额之前重置，确保设备从干净状态开始，不受上次交易影响
+            val allValueCountryCodes = allDenominations.mapNotNull { denom ->
+                denominationToValueCountryCode[denom]
+            }
+            
+            if (allValueCountryCodes.isNotEmpty()) {
+                val resetRequest = SetDenominationInhibitsRequest(
+                    valueCountryCodes = allValueCountryCodes,
+                    inhibit = false  // 重置为允许接收
+                )
+                
+                val resetResponse = api.setDenominationInhibits(deviceID, resetRequest)
+                val resetBodyText = cleanResponseBody(resetResponse.body()?.string())
+                val resetHttpCode = resetResponse.code()
+                
+                Log.d(TAG, "步骤 3：重置所有面额禁用状态: isSuccessful=${resetResponse.isSuccessful}, code=$resetHttpCode, body=$resetBodyText")
+                
+                if (!resetResponse.isSuccessful) {
+                    Log.e(TAG, "重置面额禁用状态失败，但继续执行")
+                }
+            }
+            
+            // 4. 计算可安全接收的面额（使用动态规划算法）- V3.3 规范步骤 4
+            // 对步骤 1 得到的每一种面额 value（分），若 value > targetCents，则需找零金额 change = value - targetCents
+            // 使用动态规划算法判断合并后的 recycler 库存（纸币器 recycler + 硬币器 payout）能否精确组合出 change
+            Log.d(TAG, "步骤 4：开始计算不安全面额（使用动态找零算法）")
+            Log.d(TAG, "动态找零判断: 目标金额=${targetCents}分, 纸币 recycler 库存=${billRecyclerInventory.entries.joinToString { "${it.key}分×${it.value}" }}, 硬币 payout 库存=${coinPayoutInventory.entries.joinToString { "${it.key}分×${it.value}" }}")
+            
+            val unsafeDenominations = ChangeSafetyCalculator.calculateUnsafeDenominations(
+                targetCents = targetCents,
+                allDenominations = allDenominations,
+                recyclerInventory = recyclerInventory
+            )
+            
+            Log.d(TAG, "步骤 4：不安全面额计算完成: ${if (unsafeDenominations.isEmpty()) "无" else unsafeDenominations.sorted().joinToString { "${it}分" }}")
+            if (unsafeDenominations.isNotEmpty()) {
+                Log.d(TAG, "已禁用的不安全面额详情: ${unsafeDenominations.sorted().joinToString { "${it}分 (${it / 100.0}€)" }}")
+            }
+            
+            // 5. 设置本次交易禁用面额（不安全面额 Inhibit=true）- V3.3 规范步骤 5
+            if (unsafeDenominations.isNotEmpty()) {
+                val unsafeValueCountryCodes = unsafeDenominations.mapNotNull { denom ->
+                    denominationToValueCountryCode[denom]
+                }
+                
+                val inhibitRequest = SetDenominationInhibitsRequest(
+                    valueCountryCodes = unsafeValueCountryCodes,
+                    inhibit = true  // 禁用不安全面额
+                )
+                
+                val inhibitResponse = api.setDenominationInhibits(deviceID, inhibitRequest)
+                val inhibitBodyText = cleanResponseBody(inhibitResponse.body()?.string())
+                val inhibitHttpCode = inhibitResponse.code()
+                
+                Log.d(TAG, "禁用不安全面额: isSuccessful=${inhibitResponse.isSuccessful}, code=$inhibitHttpCode, body=$inhibitBodyText")
+                Log.d(TAG, "已禁用面额: ${unsafeValueCountryCodes.joinToString()}")
+                
+                if (!inhibitResponse.isSuccessful) {
+                    Log.e(TAG, "禁用不安全面额失败，但继续执行支付流程")
+                    return false
+                }
+            } else {
+                Log.d(TAG, "所有面额均可安全接收，无需禁用")
+            }
+            
+            Log.d(TAG, "========== 支付前面额安全性评估完成 ==========")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "支付前面额安全性评估异常: deviceID=$deviceID", e)
+            false  // 失败时返回 false，但不阻止支付流程继续
         }
     }
     

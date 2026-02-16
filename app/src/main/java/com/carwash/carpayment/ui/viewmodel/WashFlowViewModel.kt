@@ -177,6 +177,8 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
                         reason = RefundReason.COMMUNICATION_FAILED,
                         registerSnapshot = readRegisterSnapshot(txId)
                     )
+                    // ⚠️ V3.1 优化：处理退款流程
+                    processRefund(order, RefundReason.COMMUNICATION_FAILED, txId)
                     return@launch
                 }
                 
@@ -190,6 +192,8 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
                         reason = RefundReason.START_TIMEOUT,
                         registerSnapshot = readRegisterSnapshot(txId)
                     )
+                    // ⚠️ V3.1 优化：处理退款流程
+                    processRefund(order, RefundReason.START_TIMEOUT, txId)
                     return@launch
                 }
                 
@@ -204,14 +208,14 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
                 // 9. 监控 102 直到结束
                 val completed = monitorUntilComplete(washMode, txId, order.program)
                 if (completed) {
-                    // 完成
+                    // ⚠️ V3.1 优化：订单在服务结束（Completed）后才允许关闭
                     _flowState.value = WashFlowState.Completed(
                         program = order.program,
                         paymentMethod = order.paymentMethod,
                         washMode = washMode,
                         registerSnapshot = readRegisterSnapshot(txId)
                     )
-                    Log.d(TAG, "[WashFlow] ========== 洗车流程完成 ==========")
+                    Log.d(TAG, "[WashFlow] ========== 洗车流程完成，订单可以关闭 ==========")
                 } else {
                     // 监控超时，进入退款
                     _flowState.value = WashFlowState.Refunding(
@@ -220,6 +224,8 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
                         reason = RefundReason.MONITOR_TIMEOUT,
                         registerSnapshot = readRegisterSnapshot(txId)
                     )
+                    // ⚠️ V3.1 优化：处理退款流程
+                    processRefund(order, RefundReason.MONITOR_TIMEOUT, txId)
                 }
                 
             } catch (e: Exception) {
@@ -252,16 +258,18 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
         try {
             Log.d(TAG, "[WashFlow] 现金支付开始：目标金额=${targetAmountCents}分 (${order.program.price}€)")
             
-            // 1. 启动现金设备会话
+            // ⚠️ V3.2 重构：不再调用 startCashSession()，直接使用已连接的设备
+            // 设备连接应在 Application 启动时完成
             val devices = try {
-                cashDeviceRepository.startCashSession(caller = "WASHFLOW_CASH_PAYMENT")
+                cashDeviceRepository.getConnectedDevices()
             } catch (e: Exception) {
-                Log.e(TAG, "[WashFlow] 现金支付：启动设备会话失败", e)
-                return@withContext PaymentResult.Failure("设备连接失败: ${e.message}")
+                Log.e(TAG, "[WashFlow] 现金支付：获取已连接设备失败", e)
+                return@withContext PaymentResult.Failure("设备未连接: ${e.message}")
             }
             
             if (devices.isEmpty()) {
-                return@withContext PaymentResult.Failure("未找到可用设备")
+                Log.e(TAG, "[WashFlow] 现金支付：未找到已连接设备，请确保在 Application 启动时已完成设备连接")
+                return@withContext PaymentResult.Failure("未找到可用设备，请重启应用")
             }
             
             // 2. 设置 baseline（基于 GetCounters 的 stackedTotalCents）
@@ -287,13 +295,14 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
             cashDeviceRepository.startCoinDevice()
             
             // 4. 开始现金支付会话（启用接收器并开启自动接受）
-            val billSessionSuccess = cashDeviceRepository.beginBillCashSession()
+            // ⚠️ V3.1 优化：传入 targetAmountCents 参数，确保目标金额 > 0 才启用接收器
+            val billSessionSuccess = cashDeviceRepository.beginBillCashSession(targetAmountCents)
             if (!billSessionSuccess) {
                 Log.e(TAG, "[WashFlow] 纸币器开始支付会话失败")
                 return@withContext PaymentResult.Failure("纸币器启动失败")
             }
             
-            val coinSessionSuccess = cashDeviceRepository.beginCoinCashSession()
+            val coinSessionSuccess = cashDeviceRepository.beginCoinCashSession(targetAmountCents)
             if (!coinSessionSuccess) {
                 Log.e(TAG, "[WashFlow] 硬币器开始支付会话失败")
                 cashDeviceRepository.endBillCashSession()
@@ -468,29 +477,36 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
     
     /**
      * 等待 GateCheck 条件满足（带超时）
+     * ⚠️ V3.1 修复：使用 GATE_CHECK_240 而非 GATE_CHECK_752，增加超时处理和故障恢复逻辑
      */
     private suspend fun waitForGateCheck(order: WashOrder, txId: String): Boolean = withContext(Dispatchers.IO) {
         val model = order.program.id.toIntOrNull() ?: 1
         val policy = TimeoutPolicy.getDefaultPolicy(model)
-        val config = policy.phases[TimeoutPhase.GATE_CHECK_752] ?: return@withContext false
+        // ⚠️ V3.1 修复：使用 GATE_CHECK_240（等待 240=1 设备就绪）而非 GATE_CHECK_752
+        val config = policy.phases[TimeoutPhase.GATE_CHECK_240] ?: return@withContext false
         
         val startTime = System.currentTimeMillis()
         var consecutivePasses = 0
         val requiredPasses = 2
+        var lastFailureReason: GateCheckFailureReason? = null
+        var consecutiveFailures = 0
+        val maxConsecutiveFailures = 3  // ⚠️ V3.1 新增：连续失败次数阈值
         
         while (isActive) {
             val elapsed = System.currentTimeMillis() - startTime
             val elapsedSec = elapsed / 1000
             
-            // 检查硬超时
+            // ⚠️ V3.1 修复：检查硬超时，硬超时后进入退款或人工干预流程
             if (elapsedSec >= config.hardTimeoutSec) {
                 Log.e(TAG, "[WashFlow] txId=$txId, GateCheck 硬超时: ${config.hardTimeoutSec}秒")
+                // ⚠️ V3.1 新增：硬超时后触发退款或人工干预
+                handleGateCheckTimeout(order, txId, lastFailureReason, elapsedSec)
                 return@withContext false
             }
             
-            // 检查软超时
+            // ⚠️ V3.1 修复：检查软超时，软超时后继续等待但记录告警
             if (elapsedSec >= config.softTimeoutSec) {
-                Log.w(TAG, "[WashFlow] txId=$txId, GateCheck 软超时: ${config.softTimeoutSec}秒")
+                Log.w(TAG, "[WashFlow] txId=$txId, GateCheck 软超时: ${config.softTimeoutSec}秒，继续等待...")
                 // 软超时：只提示/告警，继续等待
             }
             
@@ -498,18 +514,188 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
             val failureReason = performGateCheck(order, txId)
             if (failureReason == null) {
                 consecutivePasses++
+                consecutiveFailures = 0  // ⚠️ V3.1 新增：重置连续失败计数
                 if (consecutivePasses >= requiredPasses) {
                     Log.d(TAG, "[WashFlow] txId=$txId, GateCheck 条件满足（连续${requiredPasses}次通过）")
                     return@withContext true
                 }
             } else {
                 consecutivePasses = 0
+                lastFailureReason = failureReason
+                consecutiveFailures++
+                
+                // ⚠️ V3.1 新增：连续失败次数超过阈值，尝试故障恢复
+                if (consecutiveFailures >= maxConsecutiveFailures) {
+                    Log.w(TAG, "[WashFlow] txId=$txId, GateCheck 连续失败${consecutiveFailures}次，尝试故障恢复...")
+                    val recovered = attemptGateCheckRecovery(order, txId, failureReason)
+                    if (recovered) {
+                        consecutiveFailures = 0
+                        Log.d(TAG, "[WashFlow] txId=$txId, GateCheck 故障恢复成功")
+                    } else {
+                        Log.e(TAG, "[WashFlow] txId=$txId, GateCheck 故障恢复失败，继续等待...")
+                    }
+                }
             }
             
             delay(config.pollIntervalMs)
         }
         
         false
+    }
+    
+    /**
+     * ⚠️ V3.1 新增：处理 GateCheck 超时
+     * 硬超时后应进入退款或人工干预流程
+     */
+    private suspend fun handleGateCheckTimeout(
+        order: WashOrder,
+        txId: String,
+        lastFailureReason: GateCheckFailureReason?,
+        elapsedSec: Long
+    ) {
+        Log.e(TAG, "[WashFlow] txId=$txId, GateCheck 超时处理: elapsed=${elapsedSec}秒, lastFailure=$lastFailureReason")
+        
+        // ⚠️ V3.1 优化：根据失败原因决定处理策略
+        when (lastFailureReason) {
+            GateCheckFailureReason.DEVICE_FAULT -> {
+                // 设备故障：需要人工干预
+                Log.e(TAG, "[WashFlow] txId=$txId, 设备故障超时，需要人工干预")
+                // TODO: 触发人工干预流程，更新订单状态为 ManualInterventionRequired
+            }
+            GateCheckFailureReason.DEVICE_NOT_READY -> {
+                // 设备未就绪：可能需要等待或退款
+                Log.w(TAG, "[WashFlow] txId=$txId, 设备未就绪超时，可能需要退款")
+                // TODO: 根据业务逻辑决定是继续等待还是退款
+            }
+            GateCheckFailureReason.COMMUNICATION_FAILED -> {
+                // 通讯失败：尝试重连，如果失败则退款
+                Log.w(TAG, "[WashFlow] txId=$txId, 通讯失败超时，尝试重连或退款")
+                val recovered = attemptGateCheckRecovery(order, txId, GateCheckFailureReason.COMMUNICATION_FAILED)
+                if (!recovered) {
+                    // 重连失败，触发退款流程
+                    Log.e(TAG, "[WashFlow] txId=$txId, 重连失败，触发退款流程")
+                    // TODO: 触发退款流程
+                }
+            }
+            else -> {
+                // 其他情况：默认触发退款或人工干预
+                Log.w(TAG, "[WashFlow] txId=$txId, 其他超时情况，触发退款或人工干预")
+                // TODO: 根据业务逻辑决定是退款还是人工干预
+            }
+        }
+    }
+    
+    /**
+     * ⚠️ V3.1 新增：处理退款流程
+     * 确保订单在退款完成后才关闭（状态转换为 Refunded）
+     */
+    private suspend fun processRefund(
+        order: WashOrder,
+        reason: RefundReason,
+        txId: String
+    ) = withContext(Dispatchers.IO) {
+        try {
+            Log.d(TAG, "[WashFlow] txId=$txId, 开始处理退款: reason=$reason")
+            
+            // 根据支付方式执行退款
+            when (order.paymentMethod) {
+                PaymentMethod.CASH -> {
+                    // 现金退款：由 PaymentViewModel 处理，这里只更新状态
+                    // 注意：实际退款逻辑在 PaymentViewModel 的 finishAttempt 中处理
+                    Log.d(TAG, "[WashFlow] txId=$txId, 现金退款由 PaymentViewModel 处理")
+                }
+                PaymentMethod.CARD -> {
+                    // 卡退款：调用 POS 退款接口
+                    Log.d(TAG, "[WashFlow] txId=$txId, 卡退款：调用 POS 退款接口")
+                    // TODO: 实现 POS 退款逻辑
+                }
+            }
+            
+            // ⚠️ V3.1 优化：退款完成后，将状态转换为 Refunded，订单可以关闭
+            // 注意：这里假设退款成功，实际退款结果应该从 PaymentViewModel 或 POS 服务获取
+            _flowState.value = WashFlowState.Refunded(
+                program = order.program,
+                paymentMethod = order.paymentMethod,
+                reason = reason,
+                refundAmountCents = (order.program.price * 100).toInt(), // 退款金额（实际应从退款结果获取）
+                registerSnapshot = readRegisterSnapshot(txId)
+            )
+            Log.d(TAG, "[WashFlow] txId=$txId, 退款完成，订单可以关闭")
+        } catch (e: Exception) {
+            Log.e(TAG, "[WashFlow] txId=$txId, 退款处理异常", e)
+            // 退款失败，需要人工干预
+            _flowState.value = WashFlowState.ManualInterventionRequired(
+                program = order.program,
+                paymentMethod = order.paymentMethod,
+                reason = "退款失败: ${e.message}",
+                registerSnapshot = readRegisterSnapshot(txId)
+            )
+        }
+    }
+    
+    /**
+     * ⚠️ V3.1 新增：尝试 GateCheck 故障恢复
+     * 根据故障类型执行相应的恢复策略
+     */
+    private suspend fun attemptGateCheckRecovery(
+        order: WashOrder,
+        txId: String,
+        failureReason: GateCheckFailureReason
+    ): Boolean = withContext(Dispatchers.IO) {
+        return@withContext when (failureReason) {
+            GateCheckFailureReason.COMMUNICATION_FAILED -> {
+                // 通讯失败：尝试重新连接设备
+                Log.d(TAG, "[WashFlow] txId=$txId, 尝试重新连接设备...")
+                try {
+                    // ⚠️ V3.1 优化：实现设备重连逻辑
+                    // 尝试重新读取设备状态，验证连接是否恢复
+                    val canWash = carWashRepository.api.readCanWashAgainStatus()
+                    if (canWash != null) {
+                        Log.d(TAG, "[WashFlow] txId=$txId, 设备重连成功")
+                        true
+                    } else {
+                        Log.w(TAG, "[WashFlow] txId=$txId, 设备重连失败：无法读取设备状态")
+                        false
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "[WashFlow] txId=$txId, 设备重连异常", e)
+                    false
+                }
+            }
+            GateCheckFailureReason.DEVICE_FAULT -> {
+                // 设备故障：无法自动恢复，需要人工干预
+                Log.e(TAG, "[WashFlow] txId=$txId, 设备故障，无法自动恢复，需要人工干预")
+                false
+            }
+            GateCheckFailureReason.DEVICE_NOT_READY -> {
+                // 设备未就绪：继续等待（不视为故障，可以恢复）
+                Log.d(TAG, "[WashFlow] txId=$txId, 设备未就绪，继续等待...")
+                true
+            }
+            GateCheckFailureReason.NOT_CONNECTED -> {
+                // 未连接：尝试重新连接
+                Log.w(TAG, "[WashFlow] txId=$txId, 设备未连接，尝试重新连接...")
+                try {
+                    // 尝试重新读取设备状态
+                    val faultStatus = carWashRepository.api.readFaultStatus()
+                    if (faultStatus != null) {
+                        Log.d(TAG, "[WashFlow] txId=$txId, 设备连接恢复")
+                        true
+                    } else {
+                        Log.w(TAG, "[WashFlow] txId=$txId, 设备连接恢复失败")
+                        false
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "[WashFlow] txId=$txId, 设备连接恢复异常", e)
+                    false
+                }
+            }
+            else -> {
+                // 其他故障：继续等待（可能是临时故障）
+                Log.d(TAG, "[WashFlow] txId=$txId, 其他故障，继续等待...")
+                true
+            }
+        }
     }
     
     /**

@@ -49,14 +49,29 @@ fun SelectPaymentScreen(
     val showCancelConfirmDialog = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SHOW_CANCEL_CONFIRM
     val isRefunding = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.CANCELLED_REFUNDING
     
+    // ⚠️ V3.3 规范：根据订单状态控制返回键
+    // 订单生成后（进入 PAYING），禁止返回
+    // 订单创建以后，在订单未结束以前，不允许返回首页等操作
+    val backEnabled = flowState.isBackEnabled && !showCancelConfirmDialog
+    
     // ⚠️ 关键修复：取消确认对话框显示时，禁止返回键关闭（避免误操作）
     BackHandler(enabled = showCancelConfirmDialog) {
         Log.d("SelectPaymentScreen", "取消确认对话框显示时，返回键被拦截（禁止关闭）")
         // 不执行任何操作，保持对话框显示
     }
     
+    // ⚠️ V3.3 规范：根据 isBackEnabled 控制返回键
+    // 如果返回被禁用，拦截返回键（不执行任何操作）
+    BackHandler(enabled = !backEnabled && !showCancelConfirmDialog) {
+        Log.w("SelectPaymentScreen", "❌ 订单处于终态或已创建但未结束，返回键被拦截")
+        Log.w("SelectPaymentScreen", "当前状态: ${flowState.status}, isBackEnabled=$backEnabled")
+        // 可选：给用户一个提示（例如 Toast 或 Snackbar）
+    }
+    
     // ⚠️ SUCCESS 状态下：BackHandler 直接导航回 Home 并清栈，不调用 cancelPaymentAndReturnHome（避免重置状态）
-    BackHandler(enabled = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SUCCESS && !showCancelConfirmDialog) {
+    // 注意：SUCCESS 状态下 isBackEnabled=false，所以这个 BackHandler 实际上不会触发
+    // 但保留此逻辑作为备用（如果未来规范允许 SUCCESS 状态下返回）
+    BackHandler(enabled = flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SUCCESS && backEnabled && !showCancelConfirmDialog) {
         Log.d("SelectPaymentScreen", "SUCCESS 状态下 BackHandler：直接导航回 Home 并清栈")
         onBackToHome()
     }
@@ -124,6 +139,13 @@ fun SelectPaymentScreen(
             Button(
                 onClick = {
                     Log.d("SelectPaymentScreen", "返回首页")
+                    // ⚠️ V3.3 规范：根据 isBackEnabled 控制返回操作
+                    if (!backEnabled) {
+                        Log.w("SelectPaymentScreen", "❌ 订单处于终态或已创建但未结束，不允许返回首页")
+                        Log.w("SelectPaymentScreen", "当前状态: ${flowState.status}, isBackEnabled=$backEnabled")
+                        return@Button
+                    }
+                    
                     // ⚠️ SUCCESS 状态下：直接导航回 Home 并清栈，不调用 cancelPaymentAndReturnHome（避免重置状态）
                     if (flowState.status == com.carwash.carpayment.data.payment.PaymentFlowStatus.SUCCESS) {
                         Log.d("SelectPaymentScreen", "SUCCESS 状态下返回：直接导航回 Home 并清栈")
@@ -136,7 +158,7 @@ fun SelectPaymentScreen(
                         viewModel.onUserCancelRequested(source = "PAYMENT")
                     }
                 },
-                enabled = !isRefunding,
+                enabled = backEnabled && !isRefunding,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.secondary
                 )
@@ -710,3 +732,5 @@ private fun PaymentMethodCard(
         }
     }
 }
+
+

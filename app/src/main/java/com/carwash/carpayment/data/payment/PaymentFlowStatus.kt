@@ -14,5 +14,6 @@ enum class PaymentFlowStatus {
     CANCELLED_REFUNDING, // ⚠️ 关键修复：取消中，正在退款
     CANCELLED_REFUNDED, // ⚠️ 关键修复：已取消且退款完成（remaining=0）
     STARTING_WASH,      // 启动洗车
-    WAITING            // 等待（洗车机不空闲）
+    WAITING,           // 等待（洗车机不空闲）
+    PAYMENT_SUCCESS_CHANGE_FAILED  // ⚠️ V3.3 新增：支付成功但找零失败，需要人工处理
 }

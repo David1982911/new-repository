@@ -4,6 +4,11 @@ import android.app.Application
 import android.util.Log
 import com.carwash.carpayment.data.cashdevice.CashDeviceClient
 import com.carwash.carpayment.data.cashdevice.CashDeviceRepository
+import com.carwash.carpayment.data.cashdevice.device.CashDevice
+import com.carwash.carpayment.data.cashdevice.device.SpectralPayoutDevice
+import com.carwash.carpayment.data.cashdevice.device.SmartCoinSystemDevice
+import com.carwash.carpayment.data.cashdevice.device.CashDeviceInitializer
+import com.carwash.carpayment.data.cashdevice.device.CashDeviceStatusMonitor
 import com.carwash.carpayment.data.carwash.CarWashDeviceClient
 import com.carwash.carpayment.data.carwash.CarWashDeviceRepository
 import com.carwash.carpayment.ui.viewmodel.WashFlowViewModel
@@ -34,6 +39,19 @@ class CarPaymentApplication : Application() {
         // 洗车流程 ViewModel 单例（应用生命周期）
         @Volatile
         var washFlowViewModel: com.carwash.carpayment.ui.viewmodel.WashFlowViewModel? = null
+            private set
+        
+        // ⚠️ V3.2 新增：现金设备单例（应用生命周期）
+        @Volatile
+        var billAcceptor: CashDevice? = null
+            private set
+        
+        @Volatile
+        var coinAcceptor: CashDevice? = null
+            private set
+        
+        @Volatile
+        var cashDeviceStatusMonitor: CashDeviceStatusMonitor? = null
             private set
     }
     
@@ -100,60 +118,58 @@ class CarPaymentApplication : Application() {
             Log.e(TAG, "错误详情: ${t.message}")
         }
         
-        // APP 启动时自动连接现金设备（后台执行，不阻塞启动）
+        // ⚠️ V3.2 重构：APP 启动时初始化现金设备（使用新的驱动层架构）
         // 关键：设备配置依赖 AES128 会话，任何断开都会导致设置失效
         // 因此 APP 启动后就应该初始化并连接纸币器/硬币器（只是默认不启用收款 enable）
         try {
-            Log.d(TAG, "========== APP 启动时自动连接现金设备 ==========")
+            Log.d(TAG, "========== V3.2 APP 启动时初始化现金设备 ==========")
             val cashDeviceApi = CashDeviceClient.create(context = this)
-            val probeApi = CashDeviceClient.createWithTimeout(context = this, timeoutSeconds = 30L)
+            
+            // ⚠️ V3.2 关键修复：创建 CashDeviceRepository 用于保存设备ID
             val cashDeviceRepository = CashDeviceRepository(cashDeviceApi)
             
-            // 在后台协程中初始化设备（不阻塞启动）
+            // 创建设备驱动实例
+            val billAcceptor = SpectralPayoutDevice(cashDeviceApi)
+            val coinAcceptor = SmartCoinSystemDevice(cashDeviceApi)
+            
+            // 保存为单例
+            CarPaymentApplication.billAcceptor = billAcceptor
+            CarPaymentApplication.coinAcceptor = coinAcceptor
+            
+            // ⚠️ V3.2 关键修复：创建设备初始化器，传递 Repository 用于保存设备ID
+            val initializer = CashDeviceInitializer(billAcceptor, coinAcceptor, cashDeviceRepository)
+            
+            // 创建状态监测器
+            val statusMonitor = CashDeviceStatusMonitor(billAcceptor, coinAcceptor)
+            CarPaymentApplication.cashDeviceStatusMonitor = statusMonitor
+            
+            // 在后台协程中初始化设备连接（不阻塞启动）
             val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             appScope.launch {
                 try {
-                    // 初始化纸币器（SSP=0）
-                    // 启动阶段：仅执行连接与识别，不启用接收器、不配置面额
-                    Log.d(TAG, "开始初始化纸币器 (SSP=0)...")
-                    val billSuccess = cashDeviceRepository.initializeBillAcceptor(probeApi)
-                    if (billSuccess) {
-                        val billDeviceID = cashDeviceRepository.billAcceptorDeviceID.value
-                        Log.d(TAG, "✅ 纸币器连接成功: deviceID=$billDeviceID")
-                        // 启动阶段：只做连接，不调用 EnableAcceptor/DisableAcceptor/SetInhibits/SetRoutes
-                        // 这些操作只在用户进入现金支付页面时执行
-                        // 确保接收器已禁用（初始化流程中已处理）
-                        Log.d("CASH_FLOW", "INIT_CONNECTED_BUT_ACCEPT_DISABLED bill=$billDeviceID")
-                    } else {
-                        Log.w(TAG, "❌ 纸币器连接失败（不影响其他设备）")
-                    }
+                    // ⚠️ V3.2：仅在 Application 启动时调用一次 OpenConnection
+                    // ⚠️ 关键修复：OpenConnection 成功后，DeviceID 会自动保存到 Repository
+                    Log.d(TAG, "开始初始化现金设备连接...")
+                    initializer.initialize()
+                    Log.d(TAG, "✅ 现金设备连接初始化完成")
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ 纸币器初始化异常（不影响其他设备）", e)
+                    Log.e(TAG, "❌ 现金设备连接初始化异常（不影响应用启动）", e)
                 }
                 
+                // 启动设备状态监测（独立运行，不受支付流程影响）
+                // ⚠️ V3.2 规范：使用 GetDeviceStatus 定期轮询，间隔 350-500ms
                 try {
-                    // 初始化硬币器（SSP=16）
-                    // 启动阶段：仅执行连接与识别，不启用接收器、不配置面额
-                    Log.d(TAG, "开始初始化硬币器 (SSP=16)...")
-                    val coinSuccess = cashDeviceRepository.initializeCoinAcceptor(probeApi)
-                    if (coinSuccess) {
-                        val coinDeviceID = cashDeviceRepository.coinAcceptorDeviceID.value
-                        Log.d(TAG, "✅ 硬币器连接成功: deviceID=$coinDeviceID")
-                        // 启动阶段：只做连接，不调用 EnableAcceptor/DisableAcceptor/SetInhibits/SetRoutes
-                        // 这些操作只在用户进入现金支付页面时执行
-                        // 确保接收器已禁用（初始化流程中已处理）
-                        Log.d("CASH_FLOW", "INIT_CONNECTED_BUT_ACCEPT_DISABLED coin=$coinDeviceID")
-                    } else {
-                        Log.w(TAG, "❌ 硬币器连接失败（不影响其他设备）")
-                    }
+                    Log.d(TAG, "启动设备状态监测...")
+                    statusMonitor.startMonitoring(appScope)
+                    Log.d(TAG, "✅ 设备状态监测已启动（轮询间隔: ${com.carwash.carpayment.data.cashdevice.CashPaymentConfig.DEVICE_STATUS_POLL_INTERVAL}ms）")
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ 硬币器初始化异常（不影响其他设备）", e)
+                    Log.e(TAG, "❌ 启动设备状态监测异常（不影响应用启动）", e)
                 }
                 
-                Log.d(TAG, "========== 现金设备自动连接完成 ==========")
+                Log.d(TAG, "========== V3.2 现金设备初始化完成 ==========")
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "启动现金设备自动连接失败", t)
+            Log.e(TAG, "启动现金设备初始化失败", t)
             // 不阻塞应用启动，继续执行
         }
         

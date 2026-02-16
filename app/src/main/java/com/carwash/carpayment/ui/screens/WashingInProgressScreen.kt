@@ -13,6 +13,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.BackHandler
 import com.carwash.carpayment.R
 import com.carwash.carpayment.data.carwash.CarWashStartState
 import com.carwash.carpayment.data.carwash.CarWashStartFailureReason
@@ -30,6 +31,18 @@ fun WashingInProgressScreen(
     val state by viewModel.state.collectAsState()
     val flowState by viewModel.flowState.collectAsState()
     val carWashStartState by viewModel.carWashStartState.collectAsState()
+    
+    // ⚠️ V3.3 规范：根据订单状态控制返回键
+    // 订单创建以后，在订单未结束以前，不允许返回首页等操作
+    val backEnabled = flowState.isBackEnabled
+    
+    // ⚠️ V3.3 规范：根据 isBackEnabled 控制返回键
+    // 如果返回被禁用，拦截返回键（不执行任何操作）
+    BackHandler(enabled = !backEnabled) {
+        Log.w("WashingInProgressScreen", "❌ 订单处于终态或已创建但未结束，返回键被拦截")
+        Log.w("WashingInProgressScreen", "当前状态: ${flowState.status}, isBackEnabled=$backEnabled")
+        // 可选：给用户一个提示（例如 Toast 或 Snackbar）
+    }
     
     Log.d("WashingInProgressScreen", "渲染洗车进行中页面，支付成功: ${state.paymentSuccess}, 状态: ${flowState.status}, 错误: ${flowState.errorMessage}, 洗车启动状态: ${carWashStartState?.javaClass?.simpleName}")
     

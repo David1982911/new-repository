@@ -178,9 +178,26 @@ fun PaymentNavigation(
                         // 不执行任何导航操作，等待状态变为 CANCELLED_REFUNDED
                     }
                     PaymentFlowStatus.FAILED -> {
-                        android.util.Log.d("PaymentNavigation", "支付失败，保持在支付页面")
-                        // 保持在当前页面，显示错误信息（由 SelectPaymentScreen 处理）
-                        // 注意：失败时不恢复轮询，因为还在支付页面
+                        val errorMessage = flowState.errorMessage ?: ""
+                        // ⚠️ V3.2 超时处理：检查是否为超时失败，如果是则返回首页
+                        val isTimeoutFailure = errorMessage.contains("NO_PAYMENT_TIMEOUT", ignoreCase = true) ||
+                                               errorMessage.contains("PARTIAL_PAYMENT_TIMEOUT", ignoreCase = true)
+                        
+                        if (isTimeoutFailure) {
+                            // 超时失败：返回首页
+                            android.util.Log.d("PaymentNavigation", "V3.2 超时失败，返回首页: errorMessage=$errorMessage")
+                            // 重置状态
+                            paymentViewModel.reset()
+                            homeViewModel.resetSelectedProgram()
+                            homeViewModel.resumePolling() // 恢复首页轮询
+                            // 返回首页
+                            navController.popBackStack(Screen.SelectProgram.route, inclusive = false)
+                        } else {
+                            // 其他失败：保持在支付页面
+                            android.util.Log.d("PaymentNavigation", "支付失败，保持在支付页面: errorMessage=$errorMessage")
+                            // 保持在当前页面，显示错误信息（由 SelectPaymentScreen 处理）
+                            // 注意：失败时不恢复轮询，因为还在支付页面
+                        }
                     }
                     PaymentFlowStatus.NOT_STARTED -> {
                         // 回到首页，恢复轮询

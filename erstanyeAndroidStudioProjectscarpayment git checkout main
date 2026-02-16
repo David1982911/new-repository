@@ -1,0 +1,67 @@
+[33mcommit faed9b8f1d61819e8bb8938e2ff8cb5dfed027d9[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Merge: a9d447e b458e7d
+Author: tanyehui <yhtan@creately.cn>
+Date:   Sun Feb 8 16:39:07 2026 +0800
+
+    Resolved conflict and merged .gitignore
+
+[33mcommit a9d447ed93f51f91211a540e2f0d7637203bd96c[m
+Merge: 171f0a2 70fe8d0
+Author: tanyehui <yhtan@creately.cn>
+Date:   Sun Feb 8 16:34:43 2026 +0800
+
+    Merged .gitignore and resolved conflict
+
+[33mcommit b458e7d440dad4f7978d35784e4d5c233ce266f5[m
+Author: David1982911 <yhtan@creately.cn>
+Date:   Sun Feb 8 16:26:48 2026 +0800
+
+    Initial commit
+
+[33mcommit 171f0a21ad8b197a62dae05ffc44e01b1b3c442e[m
+Author: tanyehui <yhtan@creately.cn>
+Date:   Sun Feb 8 16:02:23 2026 +0800
+
+    Initial commit with payment issue
+
+[33mcommit 70fe8d0e8ad85bd70b272a37c9361da40ba2f0ac[m
+Author: David1982911 <yhtan@creately.cn>
+Date:   Sun Feb 8 16:00:00 2026 +0800
+
+    Initial commit
+
+[33mcommit 45181666f96166954800bf94566078022b874424[m[33m ([m[1;32mhw-pass-2026-02-02[m[33m)[m
+Author: tanyehui <yhtan@creately.cn>
+Date:   Sat Feb 7 11:57:10 2026 +0800
+
+    收款后禁用收款功能，但是执行取消找零有问题
+
+[33mcommit 80a9a505478de0c86a2cc7da8dcff9d6b9172693[m[33m ([m[1;32mmaster[m[33m)[m
+Author: tanyehui <yhtan@creately.cn>
+Date:   Tue Feb 3 10:51:08 2026 +0800
+
+    调通了纸币，硬币收找
+
+[33mcommit 78db783b098ce20ff842815cc24605cc78b179ba[m
+Author: tanyehui <yhtan@creately.cn>
+Date:   Wed Jan 21 16:26:42 2026 +0800
+
+    纸币和硬币调通了
+
+[33mcommit b7796fb21ca3f5b05e3cf05ce197ca366179354e[m
+Author: tanyehui <yhtan@creately.cn>
+Date:   Sat Jan 17 17:22:37 2026 +0800
+
+    init: baseline before cash device integration
+
+[33mcommit ec6f765f6a43404840990473797f3e1c422ec0e4[m
+Author: tanyehui <yhtan@creately.cn>
+Date:   Sat Jan 17 11:19:53 2026 +0800
+
+    修复了连接以后返回Null值的问题
+
+[33mcommit cd6457b7cba85e2fe30854c6f2691c31f99243e7[m
+Author: tanyehui <yhtan@creately.cn>
+Date:   Fri Jan 16 19:34:40 2026 +0800
+
+    恢复至2026-01-16 14:34的稳定版本
