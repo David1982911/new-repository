@@ -6,6 +6,19 @@
     <string name="program_standard">Standardwäsche</string>
     <string name="program_premium">Premiumwäsche</string>
     
+    <!-- 洗车模式（数据库） -->
+    <string name="basic_wash">Basiswäsche</string>
+    <string name="basic_desc">Außenwäsche &amp; Trocknung</string>
+    <string name="standard_wash">Standardwäsche</string>
+    <string name="standard_desc">Außenwäsche + Innenraumstaubsaugen</string>
+    <string name="premium_wash">Premiumwäsche</string>
+    <string name="premium_desc">Außenwäsche + Innenraum + Wachs</string>
+    <string name="vip_wash">VIP-Wäsche</string>
+    <string name="vip_desc">Vollständige Detailwäsche + Politur</string>
+    
+    <!-- 首页标题 -->
+    <string name="home_title">Autowascheservice</string>
+    
     <!-- 增值服务 -->
     <string name="addon_wax">Wachsbehandlung</string>
     <string name="addon_interior">Innenraumreinigung</string>

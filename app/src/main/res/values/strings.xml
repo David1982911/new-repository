@@ -1,20 +1,33 @@
 <resources>
     <string name="app_name">Car Wash Payment</string>
-    
+
     <!-- 洗车程序 -->
     <string name="program_quick">Schnellwäsche</string>
     <string name="program_standard">Standardwäsche</string>
     <string name="program_premium">Premiumwäsche</string>
-    
+
+    <!-- 洗车模式（数据库） -->
+    <string name="basic_wash">Basic Wash</string>
+    <string name="basic_desc">Exterior wash &amp; dry</string>
+    <string name="standard_wash">Standard Wash</string>
+    <string name="standard_desc">Exterior + interior vacuum</string>
+    <string name="premium_wash">Premium Wash</string>
+    <string name="premium_desc">Exterior + interior + wax</string>
+    <string name="vip_wash">VIP Wash</string>
+    <string name="vip_desc">Full detail + polish</string>
+
+    <!-- 首页标题 -->
+    <string name="home_title">Wash Car Service</string>
+
     <!-- 增值服务 -->
     <string name="addon_wax">Wachsbehandlung</string>
     <string name="addon_interior">Innenraumreinigung</string>
     <string name="addon_tire">Reifenpflege</string>
-    
+
     <!-- 支付方式 -->
     <string name="payment_card">Karte (Visa/MasterCard/MIR + Apple Pay/Google Pay)</string>
     <string name="payment_cash">Bargeld</string>
-    
+
     <!-- 页面1: 选择程序 -->
     <string name="welcome_message">Willkommen</string>
     <string name="select_program_title">Wählen Sie ein Waschprogramm</string>
@@ -25,7 +38,7 @@
     <string name="duration_format">%d Min.</string>
     <string name="language_de">DE</string>
     <string name="language_en">EN</string>
-    
+
     <!-- 洗车机状态 -->
     <string name="status_ready">Ready</string>
     <string name="status_fault">Fault</string>
@@ -34,13 +47,13 @@
     <string name="status_unknown">Unknown</string>
     <string name="status_updating">Updating...</string>
     <string name="status_offline">Offline</string>
-    
+
     <!-- 现金支付 -->
     <string name="cash_target">Target: %1$s</string>
     <string name="cash_paid">Paid: %1$s</string>
     <string name="cash_remaining">Remaining: %1$s</string>
     <string name="cash_accepted_denominations">Accepted denominations: %1$s</string>
-    
+
     <!-- 错误 -->
     <string name="error_device_not_connected">Device not connected</string>
     <string name="error_communication_failed">Communication failed</string>
@@ -51,13 +64,13 @@
     <string name="error_device_fault">Device fault detected. Please contact support.</string>
     <string name="payment_failed">Payment failed</string>
     <string name="button_cancel">Cancel</string>
-    
+
     <!-- Change Error -->
     <string name="error_change_insufficient">Unable to give change. Please call staff.</string>
     <string name="error_change_failed">Change failed. Manual intervention required.</string>
     <string name="error_change_levels_unavailable">Change inventory unavailable. Please call staff.</string>
     <string name="error_counters_parse_failed">Unable to read payment amount. Please check device connection or contact support.</string>
-    
+
     <!-- Cash Payment UI -->
     <string name="cash_paid_amount">Paid: %1$s</string>
     <string name="cash_remaining_amount">Remaining: %1$s</string>
@@ -68,7 +81,7 @@
     <string name="cash_note_rejected">This banknote is not accepted. Please insert smaller notes/coins or pay by card.</string>
     <string name="cash_note_rejected_with_denominations">This banknote is not accepted. Accepted notes: %1$s. Please insert smaller notes/coins or pay by card.</string>
     <string name="cash_payment_unavailable">Cash payment currently unavailable. Please pay by card.</string>
-    
+
     <!-- Printer Errors -->
     <string name="printer_not_connected">Printer not connected</string>
     <string name="printer_cutter_error">Printer cutter error</string>
@@ -79,11 +92,11 @@
     <string name="printer_status_query_failed">Printer status query failed</string>
     <string name="printer_write_failed">Print failed</string>
     <string name="printer_exception">Print exception occurred</string>
-    
+
     <string name="payment_card_processing">POS payment processing, please swipe card...</string>
     <string name="payment_processing">Payment processing...</string>
     <string name="payment_success_redirecting">Payment successful! Redirecting...</string>
-    
+
     <!-- 页面2: 选择支付 -->
     <string name="select_payment_title">Zahlungsmethode wählen</string>
     <string name="selected_program">Ausgewähltes Programm: %1$s</string>
@@ -93,14 +106,14 @@
     <string name="error_select_payment">Bitte wählen Sie eine Zahlungsmethode</string>
     <string name="error_confirm_payment">Bitte bestätigen Sie die Zahlung</string>
     <string name="rules_confirmation_required">Bitte bestätigen Sie, dass Sie mit den Nutzungsregeln vertraut sind</string>
-    
+
     <!-- 页面3: 洗车进行中 -->
     <string name="payment_success">Zahlung erfolgreich!</string>
     <string name="washing_in_progress">Waschvorgang läuft...</string>
     <string name="washing_message">Bitte warten Sie, während Ihr Fahrzeug gewaschen wird.</string>
     <string name="washing_status_placeholder">Status: Wird verarbeitet...</string>
     <string name="button_finish">Fertig</string>
-    
+
     <!-- 交易列表 -->
     <string name="transaction_list_title">Transaktionsliste</string>
     <string name="transaction_count">Anzahl</string>
@@ -119,16 +132,16 @@
     <string name="export_excel_success">Excel erfolgreich exportiert</string>
     <string name="export_excel_failed">Excel-Export fehlgeschlagen</string>
     <string name="export_no_data">Keine Daten zum Exportieren</string>
-    
+
     <!-- 现金支付 -->
     <string name="cancel_payment">Zahlung abbrechen</string>
-    
+
     <!-- Cancel Payment Confirmation Dialog -->
     <string name="cancel_payment_title">Zahlung abbrechen?</string>
     <string name="cancel_payment_body">Wenn Sie jetzt abbrechen, erstatten wir das eingezahlte Geld.</string>
     <string name="cancel_payment_continue">Weiter bezahlen</string>
     <string name="cancel_payment_confirm">Abbrechen &amp; erstatten</string>
-    
+
     <string name="cash_insert_hint">Bitte kleine Scheine/Münzen einwerfen: %1$s</string>
     <string name="cash_cannot_accept_large">Scheine/Münzen %1$s können nicht akzeptiert werden, da Wechselgeld nicht ausreicht</string>
     <string name="cash_total_inserted">Gesamt eingeworfen: %1$s</string>
@@ -139,14 +152,14 @@
     <string name="cash_refund_failed">Rückerstattung fehlgeschlagen: %1$s</string>
     <string name="error_pending_refund">上一笔退款尚未完成（剩余 %1$s），正在处理/请稍候</string>
     <string name="error_refund_partial">退款部分失败，剩余 %1$s。请联系工作人员</string>
-    
+
     <!-- 打印机 -->
     <string name="printer_print_failed">Druck fehlgeschlagen: %1$s</string>
-    
+
     <!-- 支付失败 -->
     <string name="payment_failed_retry">Erneut versuchen</string>
     <string name="payment_failed_change_method">Zahlungsmethode ändern</string>
-    
+
     <!-- Gerätetest-Bildschirm (Default: German) -->
     <string name="device_test_title">Gerätetest</string>
     <string name="device_test_bill_acceptor">Geldscheinakzeptor</string>
@@ -188,7 +201,7 @@
     <string name="device_test_reset_cash_baseline">Cash Baseline zurücksetzen</string>
     <string name="device_test_no_denomination_data_detail">Gespeichert: %1$d</string>
     <string name="device_test_denomination_detail">%1$d %2$s | %3$s | Kanal: %4$s</string>
-    
+
     <!-- Passwort-Schutz -->
     <string name="password_gate_title">Passwort eingeben</string>
     <string name="password_gate_hint">Passwort</string>

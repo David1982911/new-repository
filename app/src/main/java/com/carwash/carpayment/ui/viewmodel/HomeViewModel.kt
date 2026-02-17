@@ -9,6 +9,9 @@ import com.carwash.carpayment.data.WashProgram
 import com.carwash.carpayment.data.carwash.CarWashDeviceRepository
 import com.carwash.carpayment.data.carwash.CarWashSnapshot
 import com.carwash.carpayment.data.config.ProgramConfigRepository
+import com.carwash.carpayment.data.transaction.AppDatabase
+import com.carwash.carpayment.data.washmode.WashMode
+import com.carwash.carpayment.data.washmode.WashModeRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,10 +47,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     
     companion object {
         private const val TAG = "HomeViewModel"
-        private const val POLL_INTERVAL_MS = 2000L // 轮询间隔 2 秒
+        private const val HOME_DEBUG_TAG = "HomeDebug"
+        private const val POLL_INTERVAL_MS = 500L // ⚠️ 阶段1：轮询间隔改为 500ms
         private const val SNAPSHOT_MAX_AGE_MS = 5000L // 快照最大年龄 5 秒
     }
     
+    // ⚠️ 阶段1：从 WashModeRepository 读取数据
+    private val database = AppDatabase.getDatabase(application)
+    private val washModeRepository = WashModeRepository(database.washModeDao())
+    
+    // 保留 configRepository（用于更新程序配置，供后台管理使用）
     private val configRepository = ProgramConfigRepository(application)
     
     // 洗车机设备（使用单例）
@@ -55,40 +64,72 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         CarPaymentApplication.carWashRepository
     }
     
-    // 可用的洗车程序（从配置读取，通过StateFlow提供）
+    // ⚠️ 阶段1：可用的洗车模式（从数据库读取，通过StateFlow提供）
+    private val _washModes = MutableStateFlow<List<WashMode>>(emptyList())
+    val washModes: StateFlow<List<WashMode>> = _washModes.asStateFlow()
+    
+    // 兼容旧代码：保留 programs（从 WashMode 转换）
     private val _programs = MutableStateFlow<List<WashProgram>>(emptyList())
     val programs: StateFlow<List<WashProgram>> = _programs.asStateFlow()
     
-    // 洗车机状态快照
+    // ⚠️ 阶段1：洗车机状态（用于底部状态栏显示）
+    // 使用简单的状态枚举，避免与现有的 WashFlowState sealed class 冲突
+    enum class MachineStatus {
+        Idle,      // 空闲
+        Ready,     // 就绪（240=1）
+        Washing,   // 洗车中（214=1）
+        Fault      // 故障（217=1）
+    }
+    
+    private val _machineStatus = MutableStateFlow<MachineStatus>(MachineStatus.Idle)
+    val machineStatus: StateFlow<MachineStatus> = _machineStatus.asStateFlow()
+    
+    // 洗车机状态快照（保留兼容）
     private val _snapshotState = MutableStateFlow<CarWashSnapshotUi>(CarWashSnapshotUi())
     val snapshotState: StateFlow<CarWashSnapshotUi> = _snapshotState.asStateFlow()
     
     // 轮询 Job
     private var pollingJob: Job? = null
+    private var statusPollingJob: Job? = null  // ⚠️ 阶段1：设备状态轮询 Job
     
     init {
-        // 从配置读取程序列表
+        Log.d(HOME_DEBUG_TAG, "========== HomeViewModel initialized ==========")
+        Log.d(HOME_DEBUG_TAG, "开始从 WashModeRepository 读取数据...")
+        
+        // ⚠️ 阶段1：从 WashModeRepository 读取数据
         viewModelScope.launch {
-            configRepository.configFlow.collect { config ->
-                Log.d(TAG, "========== HomeViewModel 程序列表更新 ==========")
-                Log.d(TAG, "source=ProgramConfigRepository.configFlow (DataStore)")
-                Log.d(TAG, "config.programs=${config.programs.map { "${it.id}: price=${it.price}€ (${(it.price * 100).toInt()}分)" }}")
-                
-                _programs.value = config.programs.map { programConfig ->
-                    val program = WashProgram(
-                        id = programConfig.id,
-                        name = programConfig.nameKey,  // 实际应从资源获取，这里先用 key
-                        minutes = programConfig.minutes,
-                        price = programConfig.price,
-                        addons = programConfig.addons
-                    )
-                    Log.d(TAG, "转换: ${programConfig.id} -> WashProgram(id=${program.id}, price=${program.price}€, priceCents=${(program.price * 100).toInt()})")
-                    program
+            // 首先确保默认数据存在
+            try {
+                washModeRepository.ensureDefaultData()
+            } catch (e: Exception) {
+                Log.e(HOME_DEBUG_TAG, "确保默认数据失败", e)
+            }
+            
+            // 然后收集洗车模式数据
+            washModeRepository.getAllActiveWashModes().collect { modes ->
+                Log.d(HOME_DEBUG_TAG, "WashModeRepository.getAllActiveWashModes: 查询到 ${modes.size} 条记录")
+                modes.forEach { mode ->
+                    Log.d(HOME_DEBUG_TAG, "  - id=${mode.id}, name=${mode.name}, price=${mode.price}€, imageResId=${mode.imageResId}")
                 }
-                Log.d(TAG, "最终 programs=${_programs.value.map { "${it.id}: ${it.price}€" }}")
-                Log.d(TAG, "==============================================")
+                _washModes.value = modes
+                
+                // 转换为 WashProgram（兼容旧代码）
+                _programs.value = modes.map { mode ->
+                    WashProgram(
+                        id = mode.id.toString(),
+                        name = mode.name,  // 资源键，UI层会转换为实际文本
+                        minutes = mode.durationMinutes,
+                        price = mode.price,
+                        addons = emptyList()  // WashMode 不包含 addons
+                    )
+                }
+                Log.d(HOME_DEBUG_TAG, "转换完成: programs=${_programs.value.size} 个")
             }
         }
+        
+        // ⚠️ 阶段1：开始轮询设备状态（500ms）
+        Log.d(HOME_DEBUG_TAG, "开始轮询设备状态（间隔: ${POLL_INTERVAL_MS}ms）")
+        startStatusPolling()
     }
     
     // 选中的程序
@@ -144,6 +185,63 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
     
     /**
+     * ⚠️ 阶段1：开始轮询设备状态（500ms间隔）
+     */
+    private fun startStatusPolling() {
+        if (statusPollingJob?.isActive == true) {
+            Log.d(HOME_DEBUG_TAG, "设备状态轮询已在运行，跳过启动")
+            return
+        }
+        
+        Log.d(HOME_DEBUG_TAG, "开始轮询设备状态（间隔: ${POLL_INTERVAL_MS}ms）")
+        statusPollingJob = viewModelScope.launch {
+            while (isActive) {
+                try {
+                    updateWashFlowState()
+                } catch (e: Exception) {
+                    Log.e(HOME_DEBUG_TAG, "轮询设备状态异常", e)
+                }
+                delay(POLL_INTERVAL_MS)
+            }
+        }
+    }
+    
+    /**
+     * ⚠️ 阶段1：更新洗车流程状态（根据PLC寄存器）
+     */
+    private suspend fun updateWashFlowState() {
+        val repository = carWashRepository
+        if (repository == null) {
+            _machineStatus.value = MachineStatus.Idle
+            return
+        }
+        
+        try {
+            val snapshot = repository.api.readSnapshot()
+            if (snapshot == null) {
+                _machineStatus.value = MachineStatus.Idle
+                return
+            }
+            
+            // 根据V3.3规范：217=1 -> Fault, 214=1 -> Washing, 240=1 -> Ready, Else -> Unknown/Idle
+            val newState = when {
+                snapshot.reg217 == 1 -> MachineStatus.Fault
+                snapshot.reg214 == 1 -> MachineStatus.Washing
+                snapshot.reg240 == 1 -> MachineStatus.Ready
+                else -> MachineStatus.Idle
+            }
+            
+            if (_machineStatus.value != newState) {
+                Log.d(HOME_DEBUG_TAG, "设备状态更新: ${_machineStatus.value} -> $newState (217=${snapshot.reg217}, 214=${snapshot.reg214}, 240=${snapshot.reg240})")
+                _machineStatus.value = newState
+            }
+        } catch (e: Exception) {
+            Log.e(HOME_DEBUG_TAG, "读取设备状态失败", e)
+            _machineStatus.value = MachineStatus.Idle
+        }
+    }
+    
+    /**
      * 开始轮询（首页可见期间调用）
      */
     fun startPolling() {
@@ -159,7 +257,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             
             // 然后按固定间隔轮询
             while (isActive) {
-                delay(POLL_INTERVAL_MS)
+                delay(2000L)  // 保持原有的2秒间隔
                 refreshSnapshot()
             }
         }
@@ -304,5 +402,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         stopPolling()
+        statusPollingJob?.cancel()
+        statusPollingJob = null
     }
 }

@@ -6,6 +6,19 @@
     <string name="program_standard">Standard Wash</string>
     <string name="program_premium">Premium Wash</string>
     
+    <!-- Wash Modes (Database) -->
+    <string name="basic_wash">Basic Wash</string>
+    <string name="basic_desc">Exterior wash &amp; dry</string>
+    <string name="standard_wash">Standard Wash</string>
+    <string name="standard_desc">Exterior + interior vacuum</string>
+    <string name="premium_wash">Premium Wash</string>
+    <string name="premium_desc">Exterior + interior + wax</string>
+    <string name="vip_wash">VIP Wash</string>
+    <string name="vip_desc">Full detail + polish</string>
+    
+    <!-- Home Title -->
+    <string name="home_title">Wash Car Service</string>
+    
     <!-- Add-on Services -->
     <string name="addon_wax">Wax Treatment</string>
     <string name="addon_interior">Interior Cleaning</string>
