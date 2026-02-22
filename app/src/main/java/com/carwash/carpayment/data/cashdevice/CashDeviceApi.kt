@@ -470,6 +470,7 @@ data class ApiResponse(
 /**
  * 设备状态响应
  * 服务器返回的数组元素包含 Type/State/StateAsString 字段
+ * ⚠️ V3.4 扩展：支持事件列表（事件驱动收款）
  * 注意：服务器可能返回空数组 []，需要容错处理
  */
 @Serializable
@@ -477,6 +478,19 @@ data class DeviceStatusResponse(
     @SerialName("Type") val type: String? = null,  // 设备类型（如 "BILL_ACCEPTOR", "COIN_MECH"）
     @SerialName("State") val state: String? = null,  // 状态枚举（如 "IDLE", "STARTED", "CONNECTED"）
     @SerialName("StateAsString") val stateAsString: String? = null,  // 状态字符串（如 "Idle", "Started", "Connected"）
+    
+    /**
+     * V3.4 新增：事件列表（可选字段，向后兼容）
+     * 如果 API 响应中包含事件，则解析为 CashEventResponse 列表
+     */
+    @SerialName("Events") val events: List<CashEventResponse>? = null,
+    
+    /**
+     * V3.4 新增：单个事件（兼容不同的 API 响应格式）
+     * 如果 API 返回单个事件对象而不是数组，使用此字段
+     */
+    @SerialName("Event") val event: CashEventResponse? = null,
+    
     @Deprecated("使用 state 或 stateAsString", ReplaceWith("state ?: stateAsString"))
     val deviceID: String? = null,  // 保留兼容性字段，但服务器不返回此字段
     @Deprecated("使用 state 或 stateAsString", ReplaceWith("state ?: stateAsString"))
@@ -495,6 +509,16 @@ data class DeviceStatusResponse(
      */
     val actualType: String?
         get() = type
+    
+    /**
+     * V3.4 新增：获取所有事件（合并 events 和 event）
+     */
+    fun getAllEvents(): List<CashEventResponse> {
+        val eventList = mutableListOf<CashEventResponse>()
+        events?.let { eventList.addAll(it) }
+        event?.let { eventList.add(it) }
+        return eventList
+    }
 }
 
 /**

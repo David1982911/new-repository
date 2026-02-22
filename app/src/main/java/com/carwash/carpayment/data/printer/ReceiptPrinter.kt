@@ -330,11 +330,12 @@ class ReceiptPrinter(private val context: Context) {
     }
     
     /**
-     * 打印小票
+     * 打印小票（V3.4 规范：80mm 模板，多语言 EN/DE）
      * @param receiptData 小票数据
+     * @param locale 语言环境（用于多语言输出），默认为系统默认 Locale
      * @return 是否打印成功
      */
-    suspend fun print(receiptData: ReceiptData): Boolean = withContext(Dispatchers.IO) {
+    suspend fun print(receiptData: ReceiptData, locale: java.util.Locale = java.util.Locale.getDefault()): Boolean = withContext(Dispatchers.IO) {
         // 打印关键日志：是否命中 0FE6:811E
         val currentDevice = currentUsbDevice
         val matched = currentDevice != null && currentDevice.vendorId == 0x0FE6 && currentDevice.productId == 0x811E
@@ -359,9 +360,9 @@ class ReceiptPrinter(private val context: Context) {
             found
         } ?: false
         
-        Log.d(TAG, "========== 开始打印 ==========")
+        Log.d(TAG, "========== V3.4 开始打印 ==========")
         Log.d(TAG, "selectedPrinter=${currentDevice?.deviceName ?: "null"}, VID=${currentDevice?.vendorId?.let { "0x${it.toString(16).uppercase()}" } ?: "null"}, PID=${currentDevice?.productId?.let { "0x${it.toString(16).uppercase()}" } ?: "null"}, matched=$matched, hasPermission=$hasPermission, openOk=$openOk, bulkOut=$hasBulkOut")
-        Log.d(TAG, "invoiceId=${receiptData.invoiceId}")
+        Log.d(TAG, "transactionId=${receiptData.transactionId}, locale=${locale.language}")
         Log.d(TAG, "==============================")
         
         if (!isConnected || pos == null) {
@@ -377,8 +378,8 @@ class ReceiptPrinter(private val context: Context) {
                 return@withContext false
             }
             
-            // 格式化小票内容
-            val lines = ReceiptFormatter.format(receiptData)
+            // V3.4 规范：格式化小票内容（多语言）
+            val lines = ReceiptFormatter.format(receiptData, locale)
             
             val posClass = pos!!::class.java
             
@@ -409,8 +410,8 @@ class ReceiptPrinter(private val context: Context) {
                         // 空行
                         feedLineMethod.invoke(pos)
                         totalBytesWritten += 2 // \r\n
-                    } else if (line == receiptData.headerTitle) {
-                        // Header Title：左对齐，大字体，粗体
+                    } else if (line == receiptData.merchantName) {
+                        // V3.4 规范：Merchant Name（必填，不可隐藏）：左对齐，大字体，粗体
                         // POS_TextOut(text, font, size, bold, underline, reverse, align)
                         textOutMethod.invoke(pos, textToPrint, 3, 24, 1, 1, 0, 0)
                         totalBytesWritten += bytesToWrite
@@ -460,7 +461,7 @@ class ReceiptPrinter(private val context: Context) {
             
             Log.d(TAG, "========== 打印成功 ==========")
             Log.d(TAG, "selectedPrinter=${currentDevice?.deviceName ?: "null"}, VID=${currentDevice?.vendorId?.let { "0x${it.toString(16).uppercase()}" } ?: "null"}, PID=${currentDevice?.productId?.let { "0x${it.toString(16).uppercase()}" } ?: "null"}, matched=$matched, hasPermission=$hasPermission, openOk=$openOk, bulkOut=$hasBulkOut")
-            Log.d(TAG, "invoiceId=${receiptData.invoiceId}, totalBytesWritten=$totalBytesWritten")
+            Log.d(TAG, "transactionId=${receiptData.transactionId}, totalBytesWritten=$totalBytesWritten")
             Log.d(TAG, "==============================")
             true
         } catch (t: Throwable) {
@@ -480,16 +481,23 @@ class ReceiptPrinter(private val context: Context) {
      */
     suspend fun testPrint(settings: ReceiptSettings): Boolean = withContext(Dispatchers.IO) {
         val testReceiptData = ReceiptData(
-            invoiceId = InvoiceIdGenerator.generate(),
-            date = java.util.Date(),
-            paymentLabel = "刷卡支付",  // 测试用支付方式标签
-            programLabel = "标准版",    // 测试用程序标签
-            amountCents = 500,          // 5.00€（基础套餐）
-            headerTitle = settings.headerTitle,
-            storeAddress = settings.storeAddress
+            transactionId = InvoiceIdGenerator.generate(),
+            dateTime = java.util.Date(),
+            paymentMethod = com.carwash.carpayment.data.PaymentMethod.CARD,  // 测试用支付方式
+            programName = "标准版",    // 测试用程序标签
+            unitPriceCents = 500L,     // 5.00€（基础套餐）
+            amountPaidCents = 500L,
+            changeCents = 0L,
+            merchantName = settings.merchantName,
+            address = settings.address,
+            phone = settings.phone,
+            showAddress = settings.showAddress,
+            showPhone = settings.showPhone,
+            showTerminalId = settings.showTerminalId,
+            terminalId = settings.terminalId.takeIf { settings.showTerminalId && it.isNotBlank() }
         )
         
-        return@withContext print(testReceiptData)
+        return@withContext print(testReceiptData, java.util.Locale.getDefault())
     }
     
     /**

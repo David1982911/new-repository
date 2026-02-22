@@ -100,11 +100,21 @@ class SmartCoinSystemDevice(
             val state = latestStatus.actualState ?: "UNKNOWN"
             val isOnline = state.uppercase() in listOf("IDLE", "STARTED", "CONNECTED", "DISABLED")
             
+            // ⚠️ V3.4 新增：从响应中提取事件列表
+            val events = mutableListOf<com.carwash.carpayment.data.cashdevice.CashEventResponse>()
+            statusList.forEach { statusResponse ->
+                // 提取事件（如果响应中包含事件）
+                val responseEvents = statusResponse.getAllEvents()
+                events.addAll(responseEvents)
+            }
+            
             // ⚠️ V3.2 关键修复：缓存最后一次 GetDeviceStatus 结果
+            // ⚠️ V3.4 扩展：包含事件列表
             val deviceStatus = DeviceStatus(
                 online = isOnline,
                 state = state,
-                error = null
+                error = null,
+                events = events
             )
             _isOnline = isOnline
             _lastDeviceStatus = deviceStatus

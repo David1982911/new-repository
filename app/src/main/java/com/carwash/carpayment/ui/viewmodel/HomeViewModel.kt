@@ -12,6 +12,7 @@ import com.carwash.carpayment.data.config.ProgramConfigRepository
 import com.carwash.carpayment.data.transaction.AppDatabase
 import com.carwash.carpayment.data.washmode.WashMode
 import com.carwash.carpayment.data.washmode.WashModeRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 首页洗车机状态 UI 状态
@@ -96,34 +98,64 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(HOME_DEBUG_TAG, "========== HomeViewModel initialized ==========")
         Log.d(HOME_DEBUG_TAG, "开始从 WashModeRepository 读取数据...")
         
-        // ⚠️ 阶段1：从 WashModeRepository 读取数据
-        viewModelScope.launch {
-            // 首先确保默认数据存在
+        // ⚠️ ANR 优化：从 WashModeRepository 读取数据（后台线程执行）
+        viewModelScope.launch(Dispatchers.IO) {
+            Log.d(HOME_DEBUG_TAG, "========== HomeViewModel.init: 开始加载套餐数据 ==========")
+            Log.d(HOME_DEBUG_TAG, "当前线程: ${Thread.currentThread().name}")
+            
+            // 首先确保默认数据存在（数据库操作在 IO 线程）
             try {
+                Log.d(HOME_DEBUG_TAG, "步骤1: 确保默认数据存在...")
                 washModeRepository.ensureDefaultData()
+                Log.d(HOME_DEBUG_TAG, "步骤1完成: 默认数据检查/插入完成")
             } catch (e: Exception) {
-                Log.e(HOME_DEBUG_TAG, "确保默认数据失败", e)
+                Log.e(HOME_DEBUG_TAG, "❌ 确保默认数据失败", e)
+                Log.e(HOME_DEBUG_TAG, "异常类型: ${e::class.java.name}")
+                Log.e(HOME_DEBUG_TAG, "异常消息: ${e.message}")
+                // 不中断流程，继续尝试加载数据
             }
             
-            // 然后收集洗车模式数据
-            washModeRepository.getAllActiveWashModes().collect { modes ->
-                Log.d(HOME_DEBUG_TAG, "WashModeRepository.getAllActiveWashModes: 查询到 ${modes.size} 条记录")
-                modes.forEach { mode ->
-                    Log.d(HOME_DEBUG_TAG, "  - id=${mode.id}, name=${mode.name}, price=${mode.price}€, imageResId=${mode.imageResId}")
+            // 然后收集洗车模式数据（Flow 收集在 IO 线程）
+            Log.d(HOME_DEBUG_TAG, "步骤2: 开始收集洗车模式数据...")
+            try {
+                washModeRepository.getAllActiveWashModes().collect { modes ->
+                    Log.d(HOME_DEBUG_TAG, "WashModeRepository.getAllActiveWashModes: 查询到 ${modes.size} 条记录")
+                    if (modes.isEmpty()) {
+                        Log.w(HOME_DEBUG_TAG, "⚠️ 警告: 查询到的套餐列表为空！")
+                    } else {
+                        modes.forEach { mode ->
+                            Log.d(HOME_DEBUG_TAG, "  - id=${mode.id}, name=${mode.name}, price=${mode.price}€, imageResId=${mode.imageResId}, isActive=${mode.isActive}")
+                        }
+                    }
+                    
+                    // ⚠️ ANR 优化：UI 状态更新切换到主线程
+                    withContext(Dispatchers.Main) {
+                        _washModes.value = modes
+                        
+                        // 转换为 WashProgram（兼容旧代码）
+                        _programs.value = modes.map { mode ->
+                            WashProgram(
+                                id = mode.id.toString(),
+                                name = mode.name,  // 资源键，UI层会转换为实际文本
+                                minutes = mode.durationMinutes,
+                                price = mode.price,
+                                addons = emptyList()  // WashMode 不包含 addons
+                            )
+                        }
+                        Log.d(HOME_DEBUG_TAG, "✅ 转换完成: washModes=${modes.size} 个, programs=${_programs.value.size} 个")
+                        Log.d(HOME_DEBUG_TAG, "========== HomeViewModel.init: 套餐数据加载完成 ==========")
+                    }
                 }
-                _washModes.value = modes
-                
-                // 转换为 WashProgram（兼容旧代码）
-                _programs.value = modes.map { mode ->
-                    WashProgram(
-                        id = mode.id.toString(),
-                        name = mode.name,  // 资源键，UI层会转换为实际文本
-                        minutes = mode.durationMinutes,
-                        price = mode.price,
-                        addons = emptyList()  // WashMode 不包含 addons
-                    )
+            } catch (e: Exception) {
+                Log.e(HOME_DEBUG_TAG, "❌ 收集洗车模式数据失败", e)
+                Log.e(HOME_DEBUG_TAG, "异常类型: ${e::class.java.name}")
+                Log.e(HOME_DEBUG_TAG, "异常消息: ${e.message}")
+                // 即使失败，也尝试更新 UI（显示空列表，避免 UI 卡住）
+                withContext(Dispatchers.Main) {
+                    _washModes.value = emptyList()
+                    _programs.value = emptyList()
+                    Log.w(HOME_DEBUG_TAG, "⚠️ 已设置空列表，避免 UI 卡住")
                 }
-                Log.d(HOME_DEBUG_TAG, "转换完成: programs=${_programs.value.size} 个")
             }
         }
         
@@ -138,12 +170,17 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     
     /**
      * 选择洗车程序
+     * ⚠️ ANR 优化：确保不阻塞主线程
      */
     fun selectProgram(programId: String) {
         Log.d(TAG, "选择洗车程序，programId: $programId")
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            // 查找程序（在后台线程执行，避免阻塞）
             val program = programs.value.find { it.id == programId }
-            _selectedProgram.value = program
+            // UI 更新切换到主线程
+            withContext(Dispatchers.Main) {
+                _selectedProgram.value = program
+            }
         }
     }
     
@@ -157,9 +194,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     
     /**
      * 更新程序配置（供后台管理使用）
+     * ⚠️ ANR 优化：确保在后台线程执行
      */
     fun updateProgramConfig(programId: String, minutes: Int? = null, price: Double? = null, addons: List<String>? = null) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             configRepository.updateProgram(programId, minutes, price, addons)
             Log.d(TAG, "程序配置已更新: $programId")
         }
@@ -167,9 +205,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     
     /**
      * 重置配置为默认值
+     * ⚠️ ANR 优化：确保在后台线程执行
      */
     fun resetConfig() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             configRepository.resetToDefault()
             Log.d(TAG, "配置已重置为默认值")
         }
@@ -177,9 +216,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     
     /**
      * 刷新一次快照（进入首页立即调用）
+     * ⚠️ ANR 优化：确保在后台线程执行
      */
     fun refreshOnce() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             refreshSnapshot()
         }
     }
@@ -194,7 +234,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
         
         Log.d(HOME_DEBUG_TAG, "开始轮询设备状态（间隔: ${POLL_INTERVAL_MS}ms）")
-        statusPollingJob = viewModelScope.launch {
+        // ⚠️ ANR 优化：确保网络请求在后台线程执行
+        statusPollingJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 try {
                     updateWashFlowState()
@@ -208,18 +249,24 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     
     /**
      * ⚠️ 阶段1：更新洗车流程状态（根据PLC寄存器）
+     * ⚠️ ANR 优化：网络请求在后台线程，UI更新在主线程
      */
     private suspend fun updateWashFlowState() {
         val repository = carWashRepository
         if (repository == null) {
-            _machineStatus.value = MachineStatus.Idle
+            withContext(Dispatchers.Main) {
+                _machineStatus.value = MachineStatus.Idle
+            }
             return
         }
         
         try {
+            // 网络请求在 IO 线程执行（已在 Dispatchers.IO 中）
             val snapshot = repository.api.readSnapshot()
             if (snapshot == null) {
-                _machineStatus.value = MachineStatus.Idle
+                withContext(Dispatchers.Main) {
+                    _machineStatus.value = MachineStatus.Idle
+                }
                 return
             }
             
@@ -231,13 +278,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 else -> MachineStatus.Idle
             }
             
-            if (_machineStatus.value != newState) {
-                Log.d(HOME_DEBUG_TAG, "设备状态更新: ${_machineStatus.value} -> $newState (217=${snapshot.reg217}, 214=${snapshot.reg214}, 240=${snapshot.reg240})")
-                _machineStatus.value = newState
+            // UI 更新切换到主线程
+            withContext(Dispatchers.Main) {
+                if (_machineStatus.value != newState) {
+                    Log.d(HOME_DEBUG_TAG, "设备状态更新: ${_machineStatus.value} -> $newState (217=${snapshot.reg217}, 214=${snapshot.reg214}, 240=${snapshot.reg240})")
+                    _machineStatus.value = newState
+                }
             }
         } catch (e: Exception) {
             Log.e(HOME_DEBUG_TAG, "读取设备状态失败", e)
-            _machineStatus.value = MachineStatus.Idle
+            withContext(Dispatchers.Main) {
+                _machineStatus.value = MachineStatus.Idle
+            }
         }
     }
     
@@ -251,7 +303,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
         
         Log.d(TAG, "开始轮询洗车机状态")
-        pollingJob = viewModelScope.launch {
+        // ⚠️ ANR 优化：确保网络请求在后台线程执行
+        pollingJob = viewModelScope.launch(Dispatchers.IO) {
             // 立即刷新一次
             refreshSnapshot()
             
@@ -295,46 +348,58 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     
     /**
      * 刷新快照
+     * ⚠️ ANR 优化：网络请求在后台线程，UI更新在主线程
      */
     private suspend fun refreshSnapshot() {
         try {
-            _snapshotState.value = _snapshotState.value.copy(isRefreshing = true)
+            // UI 更新切换到主线程
+            withContext(Dispatchers.Main) {
+                _snapshotState.value = _snapshotState.value.copy(isRefreshing = true)
+            }
             
             val repository = carWashRepository
             if (repository == null) {
                 Log.w(TAG, "洗车机 Repository 未初始化")
-                _snapshotState.value = CarWashSnapshotUi(
-                    snapshot = CarWashSnapshot.offline(),
-                    isRefreshing = false,
-                    statusText = "Offline",
-                    statusType = CarWashSnapshotUi.StatusType.OFFLINE
-                )
+                withContext(Dispatchers.Main) {
+                    _snapshotState.value = CarWashSnapshotUi(
+                        snapshot = CarWashSnapshot.offline(),
+                        isRefreshing = false,
+                        statusText = "Offline",
+                        statusType = CarWashSnapshotUi.StatusType.OFFLINE
+                    )
+                }
                 return
             }
             
+            // 网络请求在 IO 线程执行（已在 Dispatchers.IO 中）
             val snapshot = repository.api.readSnapshot()
             
             if (snapshot == null) {
                 Log.w(TAG, "读取快照失败")
-                _snapshotState.value = CarWashSnapshotUi(
-                    snapshot = CarWashSnapshot.offline(),
-                    isRefreshing = false,
-                    statusText = "Unknown",
-                    statusType = CarWashSnapshotUi.StatusType.UNKNOWN
-                )
+                withContext(Dispatchers.Main) {
+                    _snapshotState.value = CarWashSnapshotUi(
+                        snapshot = CarWashSnapshot.offline(),
+                        isRefreshing = false,
+                        statusText = "Unknown",
+                        statusType = CarWashSnapshotUi.StatusType.UNKNOWN
+                    )
+                }
                 return
             }
             
-            // 更新状态
+            // 更新状态（在 IO 线程计算，避免阻塞主线程）
             val statusType = determineStatusType(snapshot)
             val statusText = getStatusText(snapshot, statusType)
             
-            _snapshotState.value = CarWashSnapshotUi(
-                snapshot = snapshot,
-                isRefreshing = false,
-                statusText = statusText,
-                statusType = statusType
-            )
+            // UI 更新切换到主线程
+            withContext(Dispatchers.Main) {
+                _snapshotState.value = CarWashSnapshotUi(
+                    snapshot = snapshot,
+                    isRefreshing = false,
+                    statusText = statusText,
+                    statusType = statusType
+                )
+            }
             
             Log.d(TAG, "快照刷新成功: ${snapshot.getStatusSummary()}, statusType=$statusType")
             
@@ -348,12 +413,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             throw e // 重新抛出，让协程正确取消
         } catch (e: Exception) {
             Log.e(TAG, "刷新快照异常", e)
-            _snapshotState.value = CarWashSnapshotUi(
-                snapshot = CarWashSnapshot.offline(),
-                isRefreshing = false,
-                statusText = "Error",
-                statusType = CarWashSnapshotUi.StatusType.UNKNOWN
-            )
+            withContext(Dispatchers.Main) {
+                _snapshotState.value = CarWashSnapshotUi(
+                    snapshot = CarWashSnapshot.offline(),
+                    isRefreshing = false,
+                    statusText = "Error",
+                    statusType = CarWashSnapshotUi.StatusType.UNKNOWN
+                )
+            }
         }
     }
     

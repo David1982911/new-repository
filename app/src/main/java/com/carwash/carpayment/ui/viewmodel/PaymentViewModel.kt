@@ -418,6 +418,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
      */
     /**
      * ⚠️ V3.2 新增：现金支付轮询（超时策略化）
+     * ⚠️ V3.4 重构：事件驱动收款（优先使用事件，降级到 baseline 差值）
      * 职责：捕获异常，计数失败次数，按策略决定超时退款
      * @param targetAmountCents 目标金额（分）
      * @return 已收金额（分）
@@ -427,7 +428,7 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
         var consecutiveFailures = 0
         val startTime = System.currentTimeMillis()
         
-        // 获取设备ID（用于 GetCurrencyAssignment）
+        // 获取设备ID
         val billDeviceID = cashDeviceRepository.getBillAcceptorDeviceID()
         val coinDeviceID = cashDeviceRepository.getCoinAcceptorDeviceID()
         
@@ -435,15 +436,17 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
             throw IllegalStateException("现金设备未初始化")
         }
         
-        // 基线金额（用于计算增量）- 使用 stored + storedInCashbox（支付收款计数口径）
+        // ⚠️ V3.4 新增：事件驱动收款
+        val tracker = cashDeviceRepository.getAmountTracker()
+        tracker.resetSessionPaidAmounts()  // 重置会话已收金额
+        
+        // ⚠️ V3.4 保留：基线金额（降级方案，仅当事件为空时使用）
         var billBaselineCents = 0
         var coinBaselineCents = 0
-        
-        // 设置基线（第一次成功读取时）
         var baselineSet = false
         
         // ⚠️ V3.2 超时处理：记录上次已收金额，用于检测现金活动
-        var previousPaidCents = 0
+        var previousPaidCents = 0L
         
         // 获取当前状态机状态（用于日志）
         val getCurrentState = { _flowState.value.status }
@@ -460,77 +463,128 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                     throw CashPaymentTimeoutException("支付硬超时: ${CashPaymentConfig.PAYMENT_HARD_TIMEOUT}ms")
                 }
                 
-                // ⚠️ 修复：使用 GetCurrencyAssignment 获取包含 cashbox 的库存（支付收款计数口径）
-                // 支付收款计数应包含所有会导致"已收钱"的层级（recycler + cashbox）
-                var billCurrentCents = 0
-                var coinCurrentCents = 0
+                // ⚠️ V3.4 新增：优先使用事件驱动累加
+                var paidCents = 0L
+                var hasEvents = false
                 
+                // 从设备状态中提取事件并累加
                 billDeviceID?.let { deviceID ->
                     try {
-                        val billAssignments = cashDeviceRepository.fetchCurrencyAssignments(deviceID)
-                        // 支付收款计数：使用 stored + storedInCashbox（包含所有已收钱）
-                        billCurrentCents = billAssignments.sumOf { it.value * (it.stored + it.storedInCashbox) }
+                        val billDevice = billAcceptor
+                        if (billDevice != null) {
+                            val status = billDevice.getDeviceStatus()
+                            status.events.forEach { event ->
+                                val amount = tracker.handleCashEvent(deviceID, event)
+                                if (amount > 0) {
+                                    hasEvents = true
+                                    Log.d(TAG, "CASH_EVENT_BILL: deviceID=$deviceID, eventType=${event.actualEventType}, value=${amount}分")
+                                }
+                            }
+                        }
                     } catch (e: Exception) {
-                        Log.w(TAG, "获取纸币器货币分配失败", e)
+                        Log.w(TAG, "获取纸币器事件失败", e)
                     }
                 }
                 
                 coinDeviceID?.let { deviceID ->
                     try {
-                        val coinAssignments = cashDeviceRepository.fetchCurrencyAssignments(deviceID)
-                        // 支付收款计数：使用 stored + storedInCashbox（包含所有已收钱）
-                        coinCurrentCents = coinAssignments.sumOf { it.value * (it.stored + it.storedInCashbox) }
+                        val coinDevice = coinAcceptor
+                        if (coinDevice != null) {
+                            val status = coinDevice.getDeviceStatus()
+                            status.events.forEach { event ->
+                                val amount = tracker.handleCashEvent(deviceID, event)
+                                if (amount > 0) {
+                                    hasEvents = true
+                                    Log.d(TAG, "CASH_EVENT_COIN: deviceID=$deviceID, eventType=${event.actualEventType}, value=${amount}分")
+                                }
+                            }
+                        }
                     } catch (e: Exception) {
-                        Log.w(TAG, "获取硬币器货币分配失败", e)
+                        Log.w(TAG, "获取硬币器事件失败", e)
                     }
+                }
+                
+                // 从事件驱动获取已收金额
+                if (hasEvents) {
+                    paidCents = tracker.getTotalSessionPaidCents()
+                    Log.d(TAG, "V3.4 事件驱动: paidCents=${paidCents}分 (${paidCents / 100.0}€)")
+                } else {
+                    // ⚠️ V3.4 降级：如果事件为空，使用 baseline 差值（向后兼容）
+                    Log.d(TAG, "V3.4 降级：事件为空，使用 baseline 差值计算")
+                    
+                    var billCurrentCents = 0
+                    var coinCurrentCents = 0
+                    
+                    billDeviceID?.let { deviceID ->
+                        try {
+                            val billAssignments = cashDeviceRepository.fetchCurrencyAssignments(deviceID)
+                            billCurrentCents = billAssignments.sumOf { it.value * (it.stored + it.storedInCashbox) }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "获取纸币器货币分配失败", e)
+                        }
+                    }
+                    
+                    coinDeviceID?.let { deviceID ->
+                        try {
+                            val coinAssignments = cashDeviceRepository.fetchCurrencyAssignments(deviceID)
+                            coinCurrentCents = coinAssignments.sumOf { it.value * (it.stored + it.storedInCashbox) }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "获取硬币器货币分配失败", e)
+                        }
+                    }
+                    
+                    // 设置基线（第一次成功读取时）
+                    if (!baselineSet) {
+                        billBaselineCents = billCurrentCents
+                        coinBaselineCents = coinCurrentCents
+                        baselineSet = true
+                        Log.d(TAG, "========== 收款轮询基线已设置（降级方案） ==========")
+                        Log.d(TAG, "billBaselineCents=${billBaselineCents}分 (${billBaselineCents / 100.0}€)")
+                        Log.d(TAG, "coinBaselineCents=${coinBaselineCents}分 (${coinBaselineCents / 100.0}€)")
+                    }
+                    
+                    // 计算已收金额（增量）- 本次 delta
+                    val billDeltaCents = billCurrentCents - billBaselineCents
+                    val coinDeltaCents = coinCurrentCents - coinBaselineCents
+                    paidCents = (billDeltaCents + coinDeltaCents).toLong()
                 }
                 
                 // 重置失败计数
                 consecutiveFailures = 0
                 
-                // 设置基线（第一次成功读取时）
-                if (!baselineSet) {
-                    billBaselineCents = billCurrentCents
-                    coinBaselineCents = coinCurrentCents
-                    baselineSet = true
-                    Log.d(TAG, "========== 收款轮询基线已设置 ==========")
-                    Log.d(TAG, "billBaselineCents=${billBaselineCents}分 (${billBaselineCents / 100.0}€)")
-                    Log.d(TAG, "coinBaselineCents=${coinBaselineCents}分 (${coinBaselineCents / 100.0}€)")
-                }
-                
-                // 计算已收金额（增量）- 本次 delta
-                val billDeltaCents = billCurrentCents - billBaselineCents
-                val coinDeltaCents = coinCurrentCents - coinBaselineCents
-                val paidCents = billDeltaCents + coinDeltaCents
-                
-                // ⚠️ 关键日志：每次轮询都打印 total/delta/累计 inserted
-                Log.d(TAG, "========== 收款轮询日志 ==========")
-                Log.d(TAG, "billTotalCents=${billCurrentCents}分 (${billCurrentCents / 100.0}€), billDelta=${billDeltaCents}分")
-                Log.d(TAG, "coinTotalCents=${coinCurrentCents}分 (${coinCurrentCents / 100.0}€), coinDelta=${coinDeltaCents}分")
+                // ⚠️ V3.4 关键日志：每次轮询都打印事件驱动或降级方案的金额
+                Log.d(TAG, "========== 收款轮询日志（V3.4 事件驱动） ==========")
                 Log.d(TAG, "insertedCents(累计)=${paidCents}分 (${paidCents / 100.0}€), amountCents(应付)=${targetAmountCents}分 (${targetAmountCents / 100.0}€)")
                 Log.d(TAG, "当前状态机 state=${getCurrentState()}, 距离超时剩余=${remainingSeconds}秒, elapsed=${elapsed}ms")
+                if (hasEvents) {
+                    Log.d(TAG, "数据来源: 事件驱动（CashEventResponse）")
+                } else {
+                    Log.d(TAG, "数据来源: baseline 差值（降级方案）")
+                }
                 
                 // ⚠️ V3.2 超时处理：检测现金活动（金额增加）
                 if (paidCents > previousPaidCents) {
-                    val amountIncrease = paidCents - previousPaidCents
+                    val amountIncrease = (paidCents - previousPaidCents)
                     Log.d(TAG, "检测到现金插入: amountIncrease=${amountIncrease}分 (${amountIncrease / 100.0}€), insertedCents: ${previousPaidCents}分 -> ${paidCents}分")
-                    onCashInserted(amountIncrease)
+                    onCashInserted(amountIncrease.toInt())
                     previousPaidCents = paidCents
                 }
                 
-                // 更新 UI 状态
-                _flowState.value = _flowState.value.copy(
-                    paidAmountCents = paidCents,
-                    targetAmountCents = targetAmountCents
-                )
+                // ⚠️ ANR 优化：UI 状态更新切换到主线程
+                withContext(Dispatchers.Main) {
+                    _flowState.value = _flowState.value.copy(
+                        paidAmountCents = paidCents.toInt(),
+                        targetAmountCents = targetAmountCents
+                    )
+                }
                 
                 // 检查是否达到目标金额
                 if (paidCents >= targetAmountCents) {
-                    Log.d(TAG, "========== 支付完成 ==========")
+                    Log.d(TAG, "========== 支付完成（V3.4 事件驱动） ==========")
                     Log.d(TAG, "insertedCents=${paidCents}分 >= amountCents=${targetAmountCents}分, 触发支付成功")
                     // ⚠️ V3.2 超时处理：支付成功，取消超时监控
                     handlePaymentSuccess()
-                    return paidCents
+                    return paidCents.toInt()
                 }
                 
             } catch (e: Exception) {
@@ -3640,13 +3694,14 @@ private suspend fun cleanupDisableAcceptors(
                 )
                     Log.d(TAG, "====================================")
                     
-                    // ⚠️ POS 成功后必打印：在状态机 SUCCESS 分支必须调用 printReceipt()
+                    // ⚠️ V3.4 规范：PaymentAuthorized 立即打印（不依赖 GateCheck/PLC/Running/Completed）
                     val successState = stateMachine.paymentSuccess(_flowState.value)
                     if (successState != null) {
                         _flowState.value = successState
-                        Log.d(TAG, "POS 支付处理完成，状态: SUCCESS")
+                        Log.d(TAG, "POS 支付处理完成，状态: SUCCESS (PaymentAuthorized)")
                         
-                        // 支付成功后触发打印（使用 SupervisorJob 确保打印协程不被取消）
+                        // ⚠️ V3.4 规范：支付成功后立即触发打印（使用 SupervisorJob 确保打印协程不被取消）
+                        Log.d("PRINT_MARK", "PRINT_MARK START (V3.4: PaymentAuthorized immediate print) POS payment")
                         triggerReceiptPrintWithSupervisor(currentState)
                     } else {
                         Log.e(TAG, "POS 支付：状态机转换失败（paymentSuccess 返回 null）")
@@ -3792,10 +3847,11 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
     
     /**
      * 检查订单是否处于终态或已创建但未结束
-     * 根据 V3.3 规范：
-     * - ORDER_COMPLETED = 正常服务完成（SUCCESS 且洗车完成）
+     * 根据 V3.4 规范：
+     * - ORDER_PENDING_CONFIRMATION = MODE已发送，等待PLC运行确认
+     * - ORDER_COMPLETED = 服务已启动确认（确认PLC运行后），不代表服务结束
      * - ORDER_REFUNDED = 退款成功（CANCELLED_REFUNDED）
-     * - ORDER_MANUAL = 需人工介入（PAYMENT_SUCCESS_CHANGE_FAILED）
+     * - ORDER_MANUAL = 需人工介入（PAYMENT_SUCCESS_CHANGE_FAILED 或 PLC_CONFIRM_TIMEOUT）
      * - 订单一旦进入上述终态，不再允许任何操作
      * - 订单创建以后，在订单未结束以前，不允许取消支付、返回首页等操作
      * 
@@ -4287,14 +4343,19 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         viewModelScope.launch {
             try {
                 val amountCents = (program.price * 100).toInt()
-                Log.d(TAG, "========== 开始打印小票 ==========")
-            Log.d(
-                TAG,
-                "program=${program.name}, paymentMethod=$paymentMethod, amountCents=$amountCents"
-            )
+                val paidCents = state.paidAmountCents
+                // V3.4 规范：如果已支付金额 > 目标金额，计算找零
+                val actualChangeCents = if (paidCents > amountCents) {
+                    (paidCents - amountCents).toLong()
+                } else {
+                    0L
+                }
+                
+                Log.d(TAG, "========== V3.4 开始打印小票（PaymentAuthorized 立即打印） ==========")
+                Log.d(TAG, "program=${program.name}, paymentMethod=$paymentMethod, amountCents=$amountCents, paidCents=$paidCents, changeCents=$actualChangeCents")
                 Log.d(TAG, "payload: programId=${program.id}, programPrice=${program.price}€")
                 
-                val result = receiptPrintService.printForPayment(program, paymentMethod, amountCents)
+                val result = receiptPrintService.printForPayment(program, paymentMethod, amountCents, actualChangeCents)
                 
                 when (result) {
                     is com.carwash.carpayment.data.printer.PrintResult.Success -> {
@@ -4380,9 +4441,12 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
     
     /**
      * 触发小票打印（使用 SupervisorJob 确保打印协程不被导航/cleanup 取消）
+     * V3.4 规范：PaymentAuthorized 立即打印
      * 打印失败不影响主流程，但会更新状态供UI显示
+     * @param state 支付状态
+     * @param changeCents 找零金额（分），默认为 0（POS 支付无找零）
      */
-    private fun triggerReceiptPrintWithSupervisor(state: PaymentFlowState) {
+    private fun triggerReceiptPrintWithSupervisor(state: PaymentFlowState, changeCents: Long = 0L) {
         val program = state.selectedProgram
         val paymentMethod = state.selectedPaymentMethod
         
@@ -4395,14 +4459,19 @@ fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.Car
         viewModelScope.launch(SupervisorJob()) {
             try {
                 val amountCents = (program.price * 100).toInt()
-                Log.d(TAG, "========== 开始打印小票（SupervisorJob） ==========")
-            Log.d(
-                TAG,
-                "program=${program.name}, paymentMethod=$paymentMethod, amountCents=$amountCents"
-            )
+                val paidCents = state.paidAmountCents
+                // V3.4 规范：如果已支付金额 > 目标金额，计算找零
+                val actualChangeCents = if (paidCents > amountCents) {
+                    (paidCents - amountCents).toLong()
+                } else {
+                    changeCents
+                }
+                
+                Log.d(TAG, "========== V3.4 开始打印小票（PaymentAuthorized 立即打印，SupervisorJob） ==========")
+                Log.d(TAG, "program=${program.name}, paymentMethod=$paymentMethod, amountCents=$amountCents, paidCents=$paidCents, changeCents=$actualChangeCents")
                 Log.d(TAG, "payload: programId=${program.id}, programPrice=${program.price}€")
                 
-                val result = receiptPrintService.printForPayment(program, paymentMethod, amountCents)
+                val result = receiptPrintService.printForPayment(program, paymentMethod, amountCents, actualChangeCents)
                 
                 when (result) {
                     is com.carwash.carpayment.data.printer.PrintResult.Success -> {

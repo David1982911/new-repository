@@ -12,6 +12,8 @@ import com.carwash.carpayment.data.carwash.CarWashGateCheck
 import com.carwash.carpayment.data.carwash.CarWashGateCheckResult
 import com.carwash.carpayment.data.cashdevice.CashDeviceClient
 import com.carwash.carpayment.data.cashdevice.CashDeviceRepository
+import com.carwash.carpayment.data.config.TimeoutConfig
+import com.carwash.carpayment.data.order.OrderState
 import com.carwash.carpayment.data.pos.PosPaymentService
 import com.carwash.carpayment.data.pos.PaymentResult as PosPaymentResult
 import com.carwash.carpayment.data.pos.UsdkPosPaymentService
@@ -62,6 +64,10 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
     // 流程状态
     private val _flowState = MutableStateFlow<WashFlowState>(WashFlowState.Idle)
     val flowState: StateFlow<WashFlowState> = _flowState.asStateFlow()
+    
+    // 订单状态（V3.4 规范：独立于 WashFlowState）
+    private val _orderState = MutableStateFlow<OrderState>(OrderState.ORDER_PAYMENT_INIT)
+    val orderState: StateFlow<OrderState> = _orderState.asStateFlow()
     
     // 当前交易ID（用于日志追踪）
     private var currentTxId: String? = null
@@ -182,18 +188,41 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
                     return@launch
                 }
                 
-                // 7. 等待 214 进入自动状态
-                val runningResult = waitForRunning(washMode, txId, order.program)
-                if (!runningResult) {
-                    // 启动超时，进入退款
-                    _flowState.value = WashFlowState.Refunding(
+                // ⚠️ V3.4 规范：MODE 写入成功后，立即设置 ORDER_PENDING_CONFIRMATION
+                _orderState.value = OrderState.ORDER_PENDING_CONFIRMATION
+                Log.d(TAG, "[WashFlow] txId=$txId, ORDER_STATE_CHANGE: ORDER_PAID -> ORDER_PENDING_CONFIRMATION")
+                
+                // 7. 两阶段确认：等待 PLC 运行确认（1500ms 内检测 214=1 或 102≠0）
+                val confirmResult = confirmPlcRunning(washMode, txId, order.program)
+                if (!confirmResult) {
+                    // 超时未确认，进入人工处理
+                    _orderState.value = OrderState.ORDER_MANUAL
+                    Log.e(TAG, "[WashFlow] txId=$txId, ORDER_STATE_CHANGE: ORDER_PENDING_CONFIRMATION -> ORDER_MANUAL, reason=PLC_CONFIRM_TIMEOUT")
+                    // TODO: 生成 ServiceTicket 并记录 failureReasonCode=PLC_CONFIRM_TIMEOUT
+                    _flowState.value = WashFlowState.ManualInterventionRequired(
                         program = order.program,
                         paymentMethod = order.paymentMethod,
-                        reason = RefundReason.START_TIMEOUT,
+                        reason = "PLC 运行确认超时（${TimeoutConfig.PLC_CONFIRM_TIMEOUT_MS}ms 内未检测到运行态）",
                         registerSnapshot = readRegisterSnapshot(txId)
                     )
-                    // ⚠️ V3.1 优化：处理退款流程
-                    processRefund(order, RefundReason.START_TIMEOUT, txId)
+                    return@launch
+                }
+                
+                // 确认成功，订单完成
+                _orderState.value = OrderState.ORDER_COMPLETED
+                Log.d(TAG, "[WashFlow] txId=$txId, ORDER_STATE_CHANGE: ORDER_PENDING_CONFIRMATION -> ORDER_COMPLETED")
+                
+                // 8. 继续等待 214 进入自动状态（用于 UI 显示，不影响订单状态）
+                val runningResult = waitForRunning(washMode, txId, order.program)
+                if (!runningResult) {
+                    // 启动超时，但订单已完成，仅记录日志
+                    Log.w(TAG, "[WashFlow] txId=$txId, 启动超时，但订单已完成（ORDER_COMPLETED），不影响订单状态")
+                    _flowState.value = WashFlowState.ManualInterventionRequired(
+                        program = order.program,
+                        paymentMethod = order.paymentMethod,
+                        reason = "启动超时，但订单已完成",
+                        registerSnapshot = readRegisterSnapshot(txId)
+                    )
                     return@launch
                 }
                 
@@ -746,7 +775,56 @@ class WashFlowViewModel(application: Application) : AndroidViewModel(application
     }
     
     /**
-     * 等待 214 进入自动状态
+     * 两阶段确认：检测 PLC 运行（V3.4 规范）
+     * 
+     * 在 MODE 写入成功后的 1500ms（可配置）内，必须检测到以下任一条件：
+     * - 214 == 1（设备进入运行）
+     * - 102 != 0（模式寄存器确认）
+     * 
+     * @return true 表示确认成功，false 表示超时未确认
+     */
+    private suspend fun confirmPlcRunning(washMode: Int, txId: String, program: WashProgram): Boolean = withContext(Dispatchers.IO) {
+        val timeoutMs = TimeoutConfig.PLC_CONFIRM_TIMEOUT_MS
+        val startTime = System.currentTimeMillis()
+        val pollIntervalMs = 100L // 轮询间隔 100ms
+        
+        Log.d(TAG, "[WashFlow] txId=$txId, 开始两阶段确认：等待 ${timeoutMs}ms 内检测到 214=1 或 102≠0")
+        
+        while (isActive) {
+            val elapsed = System.currentTimeMillis() - startTime
+            
+            // 检查超时
+            if (elapsed >= timeoutMs) {
+                Log.e(TAG, "[WashFlow] txId=$txId, 两阶段确认超时: ${timeoutMs}ms 内未检测到运行态")
+                return@withContext false
+            }
+            
+            try {
+                // 检测 214 == 1
+                val washStartStatus = carWashRepository.api.readWashStartStatus()
+                if (washStartStatus == true) {
+                    Log.d(TAG, "[WashFlow] txId=$txId, 两阶段确认成功: 检测到 214=1 (运行态)")
+                    return@withContext true
+                }
+                
+                // 检测 102 != 0
+                val carPosition = carWashRepository.api.readCarPositionStatus()
+                if (carPosition == true) {
+                    Log.d(TAG, "[WashFlow] txId=$txId, 两阶段确认成功: 检测到 102≠0 (车到位)")
+                    return@withContext true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "[WashFlow] txId=$txId, 读取寄存器异常，继续轮询", e)
+            }
+            
+            delay(pollIntervalMs)
+        }
+        
+        false
+    }
+    
+    /**
+     * 等待 214 进入自动状态（用于 UI 显示，不影响订单状态）
      */
     private suspend fun waitForRunning(washMode: Int, txId: String, program: WashProgram): Boolean = withContext(Dispatchers.IO) {
         val model = program.id.toIntOrNull() ?: 1

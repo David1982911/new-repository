@@ -3,7 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
-    kotlin("kapt")
+    alias(libs.plugins.ksp)
 }
 
 import java.text.SimpleDateFormat
@@ -55,6 +55,9 @@ android {
         buildConfig = true  // 启用 BuildConfig 生成
     }
     
+    // KSP 配置（替代 Kapt）
+    // KSP 不需要额外配置，会自动处理
+    
     // USDK SDK: 配置 native 库路径
     sourceSets {
         getByName("main") {
@@ -64,6 +67,9 @@ android {
 }
 
 dependencies {
+    // Kotlin 标准库 - 确保版本一致
+    implementation(libs.kotlin.stdlib)
+    
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -82,9 +88,9 @@ dependencies {
     // ProcessLifecycleOwner (for app lifecycle monitoring)
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     
-    // Coroutines - 明确指定版本以避免冲突
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Coroutines - 使用版本目录统一管理
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.android)
     
     // DataStore
     implementation(libs.androidx.datastore.preferences)
@@ -92,10 +98,13 @@ dependencies {
     // Serialization
     implementation(libs.kotlinx.serialization.json)
     
-    // Room
+    // Room - 确保版本一致，使用 KSP 替代 Kapt
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
-    kapt(libs.androidx.room.compiler)
+    ksp(libs.androidx.room.compiler)
+    
+    // Guava - 添加以解决可能的依赖冲突
+    implementation(libs.guava)
     
     // Retrofit for REST API
     implementation(libs.retrofit)
@@ -116,4 +125,14 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+    
+    // 强制使用 Kotlin 2.0.21 以确保版本一致
+    configurations.all {
+        resolutionStrategy {
+            force("org.jetbrains.kotlin:kotlin-stdlib:2.0.21")
+            force("org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.0.21")
+            force("org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.0.21")
+            force("org.jetbrains.kotlin:kotlin-stdlib-common:2.0.21")
+        }
+    }
 }

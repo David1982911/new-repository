@@ -111,9 +111,9 @@ object CashDeviceClient {
             .addInterceptor(authInterceptor)
             .addInterceptor(loggingInterceptor)
             .cookieJar(cookieJar)  // 添加 Cookie 持久化
-            .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
-            .readTimeout(readTimeoutSeconds ?: timeoutSeconds, TimeUnit.SECONDS)  // ⚠️ 关键修复：独立读取超时配置
-            .writeTimeout(writeTimeoutSeconds ?: timeoutSeconds, TimeUnit.SECONDS)  // ⚠️ 关键修复：独立写入超时配置
+            .connectTimeout(timeoutSeconds.coerceAtMost(10), TimeUnit.SECONDS)  // ⚠️ ANR 优化：最大 10 秒连接超时
+            .readTimeout((readTimeoutSeconds ?: timeoutSeconds).coerceAtMost(10), TimeUnit.SECONDS)  // ⚠️ ANR 优化：最大 10 秒读取超时
+            .writeTimeout((writeTimeoutSeconds ?: timeoutSeconds).coerceAtMost(10), TimeUnit.SECONDS)  // ⚠️ ANR 优化：最大 10 秒写入超时
             .build()
         
         return Retrofit.Builder()
@@ -158,9 +158,9 @@ object CashDeviceClient {
             .addInterceptor(authInterceptor)  // 授权拦截器（先执行，处理 401）
             .addInterceptor(loggingInterceptor)  // 日志拦截器（后执行，记录最终请求）
             .cookieJar(cookieJar)  // 添加 Cookie 持久化（Session 保活）
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)  // ⚠️ ANR 优化：缩短连接超时到 10 秒
+            .readTimeout(10, TimeUnit.SECONDS)  // ⚠️ ANR 优化：缩短读取超时到 10 秒
+            .writeTimeout(10, TimeUnit.SECONDS)  // ⚠️ ANR 优化：缩短写入超时到 10 秒
             .build()
         
         return Retrofit.Builder()

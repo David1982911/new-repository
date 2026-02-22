@@ -79,11 +79,17 @@ interface CashDevice {
 
 /**
  * ⚠️ V3.2 新增：设备状态数据类
+ * ⚠️ V3.4 扩展：支持事件列表（事件驱动收款）
  */
 data class DeviceStatus(
     val online: Boolean,  // 设备是否在线
     val state: String,    // 设备状态（如 "IDLE", "STARTED", "CONNECTED"）
-    val error: String? = null  // 错误信息（如果有）
+    val error: String? = null,  // 错误信息（如果有）
+    /**
+     * V3.4 新增：事件列表（从 GetDeviceStatus 响应中提取）
+     * 包含 CashEventResponse 等事件，用于事件驱动累加收款金额
+     */
+    val events: List<com.carwash.carpayment.data.cashdevice.CashEventResponse> = emptyList()
 )
 
 /**

@@ -123,4 +123,58 @@
     <string name="device_test_session_reset">Sitzung zurückgesetzt. Bitte Münzen/Scheine erneut einwerfen.</string>
     <string name="error_counters_read_failed">Gerätestatus kann nicht gelesen werden. Bitte wiederholen.</string>
     <string name="device_test_reset_cash_baseline">Cash Baseline zurücksetzen</string>
+    
+    <!-- V3.4: Admin Console -->
+    <string name="admin_console_title">Admin-Konsole</string>
+    <string name="admin_orders_title">Bestellungen</string>
+    <string name="admin_orders_description">Bestellungen anzeigen und verwalten</string>
+    <string name="admin_reports_title">Berichte</string>
+    <string name="admin_reports_description">Berichte anzeigen und exportieren</string>
+    <string name="admin_users_title">Benutzerverwaltung</string>
+    <string name="admin_users_description">Benutzer und Berechtigungen verwalten</string>
+    <string name="back">Zurück</string>
+    <string name="login">Anmelden</string>
+    <string name="logout">Abmelden</string>
+    <string name="username">Benutzername</string>
+    <string name="password">Passwort</string>
+    <string name="login_error">Anmeldung fehlgeschlagen. Bitte überprüfen Sie Ihre Anmeldedaten.</string>
+    <string name="device_test">Gerätetest</string>
+    <string name="admin_console">Admin-Konsole</string>
+    <string name="search_orders">Bestellungen suchen</string>
+    <string name="no_orders_found">Keine Bestellungen gefunden</string>
+    <string name="order_details">Bestelldetails</string>
+    <string name="create">Erstellen</string>
+    <string name="edit">Bearbeiten</string>
+    <string name="delete">Löschen</string>
+    <string name="save">Speichern</string>
+    <string name="cancel">Abbrechen</string>
+    <string name="close">Schließen</string>
+    <string name="create_user">Benutzer erstellen</string>
+    <string name="edit_user">Benutzer bearbeiten</string>
+    <string name="change_password">Passwort ändern</string>
+    <string name="new_password">Neues Passwort</string>
+    <string name="active">Aktiv</string>
+    <string name="inactive">Inaktiv</string>
+    <string name="no_users_found">Keine Benutzer gefunden</string>
+    <string name="order_statistics">Bestellstatistik</string>
+    <string name="revenue_statistics">Umsatzstatistik</string>
+    <string name="total_orders">Gesamtbestellungen</string>
+    <string name="paid_orders">Bezahlte Bestellungen</string>
+    <string name="cancelled_orders">Stornierte Bestellungen</string>
+    <string name="failed_orders">Fehlgeschlagene Bestellungen</string>
+    <string name="total_revenue">Gesamtumsatz</string>
+    <string name="cash_total">Bargeld gesamt</string>
+    <string name="pos_total">POS gesamt</string>
+    <string name="export_to_csv">Als CSV exportieren</string>
+    <string name="export_to_pdf">Als PDF exportieren</string>
+    
+    <!-- Payment Screen Strings -->
+    <string name="payment_choose_method">Zahlungsmethode wählen</string>
+    <string name="payment_program_selected">Gewähltes Programm: %1$s</string>
+    <string name="payment_total_price">Gesamtpreis: %1$.2f€</string>
+    <string name="payment_confirm">Bestätigen</string>
+    <string name="payment_pay">Bezahlen</string>
+    <string name="payment_target">Zielbetrag: %1$s€</string>
+    <string name="payment_inserted">Eingeworfen: %1$s€</string>
+    <string name="payment_remaining">Verbleibend: %1$s€</string>
 </resources>

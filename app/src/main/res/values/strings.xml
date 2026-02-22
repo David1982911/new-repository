@@ -208,4 +208,57 @@
     <string name="password_gate_enter">Eingeben</string>
     <string name="password_gate_error">Falsches Passwort</string>
     <string name="password_gate_cancel">Abbrechen</string>
+    <!-- V3.4: Admin Console -->
+    <string name="admin_console_title">Admin Console</string>
+    <string name="admin_orders_title">Orders</string>
+    <string name="admin_orders_description">View and manage orders</string>
+    <string name="admin_reports_title">Reports</string>
+    <string name="admin_reports_description">View and export reports</string>
+    <string name="admin_users_title">User Management</string>
+    <string name="admin_users_description">Manage users and permissions</string>
+    <string name="back">Back</string>
+    <string name="login">Login</string>
+    <string name="logout">Logout</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="login_error">Login failed. Please check your credentials.</string>
+    <string name="device_test">Device Test</string>
+    <string name="admin_console">Admin Console</string>
+    <string name="search_orders">Search orders</string>
+    <string name="no_orders_found">No orders found</string>
+    <string name="order_details">Order Details</string>
+    <string name="create">Create</string>
+    <string name="edit">Edit</string>
+    <string name="delete">Delete</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="close">Close</string>
+    <string name="create_user">Create User</string>
+    <string name="edit_user">Edit User</string>
+    <string name="change_password">Change Password</string>
+    <string name="new_password">New Password</string>
+    <string name="active">Active</string>
+    <string name="inactive">Inactive</string>
+    <string name="no_users_found">No users found</string>
+    <string name="order_statistics">Order Statistics</string>
+    <string name="revenue_statistics">Revenue Statistics</string>
+    <string name="total_orders">Total Orders</string>
+    <string name="paid_orders">Paid Orders</string>
+    <string name="cancelled_orders">Cancelled Orders</string>
+    <string name="failed_orders">Failed Orders</string>
+    <string name="total_revenue">Total Revenue</string>
+    <string name="cash_total">Cash Total</string>
+    <string name="pos_total">POS Total</string>
+    <string name="export_to_csv">Export to CSV</string>
+    <string name="export_to_pdf">Export to PDF</string>
+    
+    <!-- Payment Screen Strings -->
+    <string name="payment_choose_method">Choose Payment Method</string>
+    <string name="payment_program_selected">Selected Program: %1$s</string>
+    <string name="payment_total_price">Total Price: %1$.2f€</string>
+    <string name="payment_confirm">Confirm</string>
+    <string name="payment_pay">Pay</string>
+    <string name="payment_target">Target Amount: %1$s€</string>
+    <string name="payment_inserted">Inserted: %1$s€</string>
+    <string name="payment_remaining">Remaining: %1$s€</string>
 </resources>

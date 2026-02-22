@@ -6,12 +6,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.carwash.carpayment.data.cashdevice.CashDeviceClient
 import com.carwash.carpayment.data.cashdevice.CashDeviceRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -463,30 +465,35 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         stopBillPolling()
         
         // 状态轮询 Job（1.5秒一次）
-        billStatusJob = viewModelScope.launch {
+        // ⚠️ ANR 优化：确保网络请求在后台线程执行
+        billStatusJob = viewModelScope.launch(Dispatchers.IO) {
             var lastStatus: String? = null
             while (true) {
                 try {
                     Log.d(TAG, "poll status tick (bill)")
+                    // 网络请求在 IO 线程执行
                     val status = repository.getDeviceStatus(deviceID)
                     val statusStr = status.actualState ?: "UNKNOWN"
                     
-                    // 如果状态发生变化，记录事件
-                    if (statusStr != lastStatus && lastStatus != null) {
-                        val currentState = _billAcceptorState.value
-                        _billAcceptorState.value = currentState.copy(
-                            eventCount = currentState.eventCount + 1,
-                            lastEvent = "状态变化: $lastStatus -> $statusStr",
+                    // UI 更新切换到主线程
+                    withContext(Dispatchers.Main) {
+                        // 如果状态发生变化，记录事件
+                        if (statusStr != lastStatus && lastStatus != null) {
+                            val currentState = _billAcceptorState.value
+                            _billAcceptorState.value = currentState.copy(
+                                eventCount = currentState.eventCount + 1,
+                                lastEvent = "状态变化: $lastStatus -> $statusStr",
+                                lastStatus = statusStr
+                            )
+                            addLog("纸币器事件: $lastStatus -> $statusStr")
+                            Log.d(TAG, "纸币器状态变化: $lastStatus -> $statusStr")
+                        }
+                        
+                        lastStatus = statusStr
+                        _billAcceptorState.value = _billAcceptorState.value.copy(
                             lastStatus = statusStr
                         )
-                        addLog("纸币器事件: $lastStatus -> $statusStr")
-                        Log.d(TAG, "纸币器状态变化: $lastStatus -> $statusStr")
                     }
-                    
-                    lastStatus = statusStr
-                    _billAcceptorState.value = _billAcceptorState.value.copy(
-                        lastStatus = statusStr
-                    )
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "轮询纸币器状态异常", e)
@@ -496,10 +503,12 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         }
         
         // 面额轮询 Job（6秒一次）
-        billAssignmentJob = viewModelScope.launch {
+        // ⚠️ ANR 优化：确保网络请求在后台线程执行
+        billAssignmentJob = viewModelScope.launch(Dispatchers.IO) {
             while (true) {
                 try {
                     Log.d(TAG, "poll assignment tick (bill)")
+                    // 网络请求在 IO 线程执行
                     val assignments = repository.pollCurrencyAssignments(deviceID)
                     val tracker = repository.getAmountTracker()
                     val sessionCents = tracker.getDeviceSessionCents(deviceID)
@@ -512,20 +521,23 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                     val baselineInfo = repository.getSessionBaselineInfo(deviceID)
                     val (baselineCents, currentCents, deltaCents) = baselineInfo ?: Triple(0, totalCents, sessionCents)
                     
-                    _billAcceptorState.value = _billAcceptorState.value.copy(
-                        sessionAmountCents = sessionCents,
-                        sessionAmount = sessionAmount,
-                        totalAmountCents = totalCents,
-                        totalAmount = totalAmount,
-                        baselineCents = baselineCents,
-                        baselineAmount = baselineCents / 100.0,
-                        currentCents = currentCents,
-                        currentAmount = currentCents / 100.0,
-                        deltaCents = deltaCents,
-                        deltaAmount = deltaCents / 100.0,
-                        assignments = assignments,
-                        recentChanges = recentChanges
-                    )
+                    // UI 更新切换到主线程
+                    withContext(Dispatchers.Main) {
+                        _billAcceptorState.value = _billAcceptorState.value.copy(
+                            sessionAmountCents = sessionCents,
+                            sessionAmount = sessionAmount,
+                            totalAmountCents = totalCents,
+                            totalAmount = totalAmount,
+                            baselineCents = baselineCents,
+                            baselineAmount = baselineCents / 100.0,
+                            currentCents = currentCents,
+                            currentAmount = currentCents / 100.0,
+                            deltaCents = deltaCents,
+                            deltaAmount = deltaCents / 100.0,
+                            assignments = assignments,
+                            recentChanges = recentChanges
+                        )
+                    }
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "轮询纸币器面额异常", e)
@@ -552,30 +564,35 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         stopCoinPolling()
         
         // 状态轮询 Job（1.5秒一次）
-        coinStatusJob = viewModelScope.launch {
+        // ⚠️ ANR 优化：确保网络请求在后台线程执行
+        coinStatusJob = viewModelScope.launch(Dispatchers.IO) {
             var lastStatus: String? = null
             while (true) {
                 try {
                     Log.d(TAG, "poll status tick (coin)")
+                    // 网络请求在 IO 线程执行
                     val status = repository.getDeviceStatus(deviceID)
                     val statusStr = status.actualState ?: "UNKNOWN"
                     
-                    // 如果状态发生变化，记录事件
-                    if (statusStr != lastStatus && lastStatus != null) {
-                        val currentState = _coinAcceptorState.value
-                        _coinAcceptorState.value = currentState.copy(
-                            eventCount = currentState.eventCount + 1,
-                            lastEvent = "状态变化: $lastStatus -> $statusStr",
+                    // UI 更新切换到主线程
+                    withContext(Dispatchers.Main) {
+                        // 如果状态发生变化，记录事件
+                        if (statusStr != lastStatus && lastStatus != null) {
+                            val currentState = _coinAcceptorState.value
+                            _coinAcceptorState.value = currentState.copy(
+                                eventCount = currentState.eventCount + 1,
+                                lastEvent = "状态变化: $lastStatus -> $statusStr",
+                                lastStatus = statusStr
+                            )
+                            addLog("硬币器事件: $lastStatus -> $statusStr")
+                            Log.d(TAG, "硬币器状态变化: $lastStatus -> $statusStr")
+                        }
+                        
+                        lastStatus = statusStr
+                        _coinAcceptorState.value = _coinAcceptorState.value.copy(
                             lastStatus = statusStr
                         )
-                        addLog("硬币器事件: $lastStatus -> $statusStr")
-                        Log.d(TAG, "硬币器状态变化: $lastStatus -> $statusStr")
                     }
-                    
-                    lastStatus = statusStr
-                    _coinAcceptorState.value = _coinAcceptorState.value.copy(
-                        lastStatus = statusStr
-                    )
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "轮询硬币器状态异常", e)
@@ -585,10 +602,12 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         }
         
         // 面额轮询 Job（6秒一次）
-        coinAssignmentJob = viewModelScope.launch {
+        // ⚠️ ANR 优化：确保网络请求在后台线程执行
+        coinAssignmentJob = viewModelScope.launch(Dispatchers.IO) {
             while (true) {
                 try {
                     Log.d(TAG, "poll assignment tick (coin)")
+                    // 网络请求在 IO 线程执行
                     val assignments = repository.pollCurrencyAssignments(deviceID)
                     val tracker = repository.getAmountTracker()
                     val sessionCents = tracker.getDeviceSessionCents(deviceID)
@@ -601,20 +620,23 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
                     val baselineInfo = repository.getSessionBaselineInfo(deviceID)
                     val (baselineCents, currentCents, deltaCents) = baselineInfo ?: Triple(0, totalCents, sessionCents)
                     
-                    _coinAcceptorState.value = _coinAcceptorState.value.copy(
-                        sessionAmountCents = sessionCents,
-                        sessionAmount = sessionAmount,
-                        totalAmountCents = totalCents,
-                        totalAmount = totalAmount,
-                        baselineCents = baselineCents,
-                        baselineAmount = baselineCents / 100.0,
-                        currentCents = currentCents,
-                        currentAmount = currentCents / 100.0,
-                        deltaCents = deltaCents,
-                        deltaAmount = deltaCents / 100.0,
-                        assignments = assignments,
-                        recentChanges = recentChanges
-                    )
+                    // UI 更新切换到主线程
+                    withContext(Dispatchers.Main) {
+                        _coinAcceptorState.value = _coinAcceptorState.value.copy(
+                            sessionAmountCents = sessionCents,
+                            sessionAmount = sessionAmount,
+                            totalAmountCents = totalCents,
+                            totalAmount = totalAmount,
+                            baselineCents = baselineCents,
+                            baselineAmount = baselineCents / 100.0,
+                            currentCents = currentCents,
+                            currentAmount = currentCents / 100.0,
+                            deltaCents = deltaCents,
+                            deltaAmount = deltaCents / 100.0,
+                            assignments = assignments,
+                            recentChanges = recentChanges
+                        )
+                    }
                     
                 } catch (e: Exception) {
                     Log.e(TAG, "轮询硬币器面额异常", e)

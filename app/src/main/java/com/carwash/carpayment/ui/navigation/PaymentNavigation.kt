@@ -11,6 +11,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import com.carwash.carpayment.ui.screens.AdminConsoleLoginScreen
+import com.carwash.carpayment.ui.screens.AdminConsoleScreen
 import com.carwash.carpayment.ui.screens.DeviceTestGateScreen
 import com.carwash.carpayment.ui.screens.DeviceTestScreen
 import com.carwash.carpayment.ui.screens.SelectPaymentScreen
@@ -18,6 +20,14 @@ import com.carwash.carpayment.ui.screens.SelectProgramScreen
 import com.carwash.carpayment.ui.screens.TransactionListScreen
 import com.carwash.carpayment.ui.screens.WashingInProgressScreen
 import com.carwash.carpayment.data.payment.PaymentFlowStatus
+import com.carwash.carpayment.data.user.Permission
+import com.carwash.carpayment.ui.screens.AdminOrdersScreen
+import com.carwash.carpayment.ui.screens.AdminReportsScreen
+import com.carwash.carpayment.ui.screens.AdminUsersScreen
+import com.carwash.carpayment.ui.viewmodel.AdminOrdersViewModel
+import com.carwash.carpayment.ui.viewmodel.AdminReportsViewModel
+import com.carwash.carpayment.ui.viewmodel.AdminUsersViewModel
+import com.carwash.carpayment.ui.viewmodel.AuthViewModel
 import com.carwash.carpayment.ui.viewmodel.CashDeviceTestViewModel
 import com.carwash.carpayment.ui.viewmodel.HomeViewModel
 import com.carwash.carpayment.ui.viewmodel.LanguageViewModel
@@ -36,6 +46,13 @@ fun PaymentNavigation(
 ) {
     val context = LocalContext.current
     val paymentViewModel: PaymentViewModel = viewModel(
+        factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
+            context.applicationContext as android.app.Application
+        )
+    )
+    
+    // V3.4: Auth ViewModel
+    val authViewModel: AuthViewModel = viewModel(
         factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
             context.applicationContext as android.app.Application
         )
@@ -74,6 +91,12 @@ fun PaymentNavigation(
                 onShowDeviceTest = {
                     android.util.Log.d("PaymentNavigation", "打开设备测试密码保护页面")
                     navController.navigate(Screen.DeviceTestGate.route) {
+                        popUpTo(Screen.SelectProgram.route) { inclusive = false }
+                    }
+                },
+                onShowAdminConsole = {  // V3.4: Admin Console 入口
+                    android.util.Log.d("PaymentNavigation", "打开 Admin Console 登录页面")
+                    navController.navigate(Screen.AdminConsoleLogin.route) {
                         popUpTo(Screen.SelectProgram.route) { inclusive = false }
                     }
                 }
@@ -279,6 +302,92 @@ fun PaymentNavigation(
                     android.util.Log.d("PaymentNavigation", "退出APP")
                     activity?.exitApp()
                 }
+            )
+        }
+        
+        // V3.4: Admin Console 登录
+        composable(Screen.AdminConsoleLogin.route) {
+            AdminConsoleLoginScreen(
+                authViewModel = authViewModel,
+                onLoginSuccess = {
+                    android.util.Log.d("PaymentNavigation", "Admin Console 登录成功")
+                    navController.navigate(Screen.AdminConsole.route) {
+                        popUpTo(Screen.AdminConsoleLogin.route) { inclusive = true }
+                    }
+                },
+                onBack = {
+                    android.util.Log.d("PaymentNavigation", "返回首页")
+                    navController.popBackStack()
+                }
+            )
+        }
+        
+        // V3.4: Admin Console 主屏幕
+        composable(Screen.AdminConsole.route) {
+            val currentUser by authViewModel.currentUser.collectAsState()
+            val canAccessUserManagement = currentUser?.hasPermission(Permission.MANAGE_USERS) ?: false
+            
+            AdminConsoleScreen(
+                onBack = {
+                    android.util.Log.d("PaymentNavigation", "登出并返回首页")
+                    authViewModel.logout()
+                    navController.popBackStack(Screen.SelectProgram.route, inclusive = false)
+                },
+                onNavigateToOrders = {
+                    android.util.Log.d("PaymentNavigation", "导航到订单管理")
+                    navController.navigate(Screen.AdminOrders.route)
+                },
+                onNavigateToReports = {
+                    android.util.Log.d("PaymentNavigation", "导航到报表管理")
+                    navController.navigate(Screen.AdminReports.route)
+                },
+                onNavigateToUserManagement = {
+                    android.util.Log.d("PaymentNavigation", "导航到用户管理")
+                    navController.navigate(Screen.AdminUsers.route)
+                },
+                canAccessUserManagement = canAccessUserManagement
+            )
+        }
+        
+        // V3.4: Admin Orders
+        composable(Screen.AdminOrders.route) {
+            val context = LocalContext.current
+            val ordersViewModel: AdminOrdersViewModel = viewModel(
+                factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
+                    context.applicationContext as android.app.Application
+                )
+            )
+            AdminOrdersScreen(
+                viewModel = ordersViewModel,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        
+        // V3.4: Admin Reports
+        composable(Screen.AdminReports.route) {
+            val context = LocalContext.current
+            val reportsViewModel: AdminReportsViewModel = viewModel(
+                factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
+                    context.applicationContext as android.app.Application
+                )
+            )
+            AdminReportsScreen(
+                viewModel = reportsViewModel,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        
+        // V3.4: Admin Users
+        composable(Screen.AdminUsers.route) {
+            val context = LocalContext.current
+            val usersViewModel: AdminUsersViewModel = viewModel(
+                factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
+                    context.applicationContext as android.app.Application
+                )
+            )
+            AdminUsersScreen(
+                viewModel = usersViewModel,
+                onBack = { navController.popBackStack() }
             )
         }
     }

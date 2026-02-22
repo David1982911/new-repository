@@ -2,11 +2,13 @@ package com.carwash.carpayment.data.cashdevice
 
 import android.util.Log
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
 import retrofit2.HttpException
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 /**
  * 授权拦截器
@@ -70,24 +72,27 @@ class AuthorizationInterceptor(
             // 清空旧 token
             TokenStore.clearToken()
             
-            // 重新认证
+            // ⚠️ ANR 优化：使用带超时的 runBlocking，避免长时间阻塞
+            // 注意：拦截器在 OkHttp 的线程池中运行，不会阻塞主线程，但添加超时更安全
             val authSuccess = runBlocking {
-                try {
-                    val authResponse = api.authenticate(
-                        AuthenticateRequest(defaultUsername, defaultPassword)
-                    )
-                    if (authResponse.token != null) {
-                        TokenStore.setToken(authResponse.token)
-                        Log.d(TAG, "重新认证成功，token 已更新")
-                        true
-                    } else {
-                        Log.e(TAG, "重新认证失败: ${authResponse.error}")
+                withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {  // 5 秒超时
+                    try {
+                        val authResponse = api.authenticate(
+                            AuthenticateRequest(defaultUsername, defaultPassword)
+                        )
+                        if (authResponse.token != null) {
+                            TokenStore.setToken(authResponse.token)
+                            Log.d(TAG, "重新认证成功，token 已更新")
+                            true
+                        } else {
+                            Log.e(TAG, "重新认证失败: ${authResponse.error}")
+                            false
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "重新认证异常", e)
                         false
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "重新认证异常", e)
-                    false
-                }
+                } ?: false  // 超时返回 false
             }
             
             // 如果重新认证成功，重试原请求

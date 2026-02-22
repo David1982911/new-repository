@@ -51,6 +51,7 @@ fun SelectProgramScreen(
     onProgramSelected: (String) -> Unit,
     onShowTransactionList: () -> Unit = {},
     onShowDeviceTest: () -> Unit = {},
+    onShowAdminConsole: () -> Unit = {},  // V3.4: Admin Console 入口
     paymentViewModel: PaymentViewModel? = null
 ) {
     val programs by homeViewModel.programs.collectAsState()
@@ -99,7 +100,9 @@ fun SelectProgramScreen(
                     .weight(0.12f),
                 currentLanguage = currentLanguage,
                 onEN = { languageViewModel.switchLanguage(com.carwash.carpayment.ui.viewmodel.AppLanguage.ENGLISH) },
-                onDE = { languageViewModel.switchLanguage(com.carwash.carpayment.ui.viewmodel.AppLanguage.GERMAN) }
+                onDE = { languageViewModel.switchLanguage(com.carwash.carpayment.ui.viewmodel.AppLanguage.GERMAN) },
+                onShowAdminConsole = onShowAdminConsole,  // V3.4: Admin Console 入口
+                onShowDeviceTest = onShowDeviceTest  // V3.4: Device Test 入口
             )
 
             // 中间区：8.2格（82%）—— 4个套餐等高撑满
@@ -277,7 +280,9 @@ private fun TopHeaderBar(
     modifier: Modifier,
     currentLanguage: com.carwash.carpayment.ui.viewmodel.AppLanguage,
     onEN: () -> Unit,
-    onDE: () -> Unit
+    onDE: () -> Unit,
+    onShowAdminConsole: () -> Unit = {},  // V3.4: Admin Console 入口
+    onShowDeviceTest: () -> Unit = {}  // V3.4: Device Test 入口
 ) {
     Box(
         modifier = modifier,
@@ -300,9 +305,34 @@ private fun TopHeaderBar(
             )
 
             Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // V3.4: Admin Console 按钮
+                OutlinedButton(
+                    onClick = onShowAdminConsole,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = stringResource(R.string.admin_console),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                
+                // V3.4: Device Test 按钮
+                OutlinedButton(
+                    onClick = onShowDeviceTest,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = stringResource(R.string.device_test),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                
+                // 语言切换按钮
                 Button(
                     onClick = onEN,
                     colors = ButtonDefaults.buttonColors(

@@ -3,21 +3,23 @@ package com.carwash.carpayment.data.cashdevice
 import android.util.Log
 
 /**
- * 现金金额跟踪器（基于 GetAllLevels 差分）
+ * 现金金额跟踪器（V3.4 重构：事件驱动）
  * 
- * ⚠️ 关键修复：本版本以 GetAllLevels 差分为唯一判定口径
+ * ⚠️ V3.4 规范：金额统计改为事件驱动，不再使用 GetAllLevels/baseline 差值
  * 
- * 金额计算方式：
- * - 支付判定：使用 GetAllLevels 差分（Levels delta）
- * - 设备状态：使用 deviceStates[deviceID].sessionDeltaCents 聚合
- * - 禁止使用：GetCounters/avgVal 参与支付成功/失败判定（仅允许作为日志维护统计）
+ * 金额计算方式（V3.4）：
+ * - 支付判定：使用事件驱动累加（CashEventResponse）
+ * - 事件类型：STORED, STACKED, VALUE_ADDED, COIN_CREDIT
+ * - 会话内累加：paidCents = Σ(event.value)
  * 
- * LEVELS 用途：
- * - 支付判定（唯一口径）
- * - 找零库存显示
+ * 保留方法（Deprecated）：
+ * - setBaselineFromLevels / setBaselineFromAssignments：仅用于找零评估，不用于收款统计
+ * - updateFromLevels / updateFromAssignments：标记为 Deprecated，逐步移除
+ * 
+ * LEVELS 用途（V3.4）：
+ * - 找零库存显示（仅用于 Change Guard 评估）
  * - 运维/诊断日志
- * 
- * ⚠️ 历史遗留：devicePaidAmounts/deviceBaselinePaidAmounts 相关字段与方法未启用，不用于支付判定
+ * - 不再用于支付判定
  */
 class CashAmountTracker {
     
@@ -728,5 +730,94 @@ class CashAmountTracker {
         clearBaselineForDevice(deviceID)
         deviceBaselinePaidAmounts.remove(deviceID)
         devicePaidAmounts.remove(deviceID)
+    }
+    
+    // ==================== V3.4 事件驱动收款（新增） ====================
+    
+    /**
+     * V3.4 新增：会话内已收金额（事件驱动累加）
+     * key = deviceID, value = 本次会话累计收款金额（分）
+     * 数据来源：CashEventResponse 事件累加
+     */
+    private val sessionPaidAmounts = mutableMapOf<String, Long>()  // key = deviceID, value = 已收金额（分）
+    
+    /**
+     * V3.4 新增：处理现金事件（事件驱动收款）
+     * 
+     * 从 getDeviceStatus() 返回的事件列表中提取 CashEventResponse，
+     * 累加 STORED, STACKED, VALUE_ADDED, COIN_CREDIT 事件的金额。
+     * 
+     * @param deviceID 设备ID
+     * @param event 现金事件
+     * @return 本次事件累加的金额（分），如果事件不是收款事件则返回 0
+     */
+    fun handleCashEvent(deviceID: String, event: CashEventResponse): Long = synchronized(lock) {
+        if (!event.isPaymentEvent()) {
+            // 不是收款事件，不累加
+            return 0L
+        }
+        
+        val amountCents = event.amountCents
+        if (amountCents <= 0) {
+            Log.w(TAG, "⚠️ 事件金额无效: deviceID=$deviceID, eventType=${event.actualEventType}, value=$amountCents")
+            return 0L
+        }
+        
+        val currentPaid = sessionPaidAmounts[deviceID] ?: 0L
+        val newPaid = currentPaid + amountCents
+        sessionPaidAmounts[deviceID] = newPaid
+        
+        Log.d(TAG, "CASH_EVENT: deviceID=$deviceID, eventType=${event.actualEventType}, value=${amountCents}分, sessionPaidCents=$newPaid")
+        
+        return amountCents
+    }
+    
+    /**
+     * V3.4 新增：获取设备会话内已收金额（事件驱动）
+     * 
+     * @param deviceID 设备ID
+     * @return 本次会话累计收款金额（分）
+     */
+    fun getDeviceSessionPaidCents(deviceID: String): Long {
+        return synchronized(lock) {
+            sessionPaidAmounts[deviceID] ?: 0L
+        }
+    }
+    
+    /**
+     * V3.4 新增：获取所有设备会话内已收金额总和（事件驱动）
+     * 
+     * @return 所有设备累计收款金额总和（分）
+     */
+    fun getTotalSessionPaidCents(): Long {
+        return synchronized(lock) {
+            sessionPaidAmounts.values.sum()
+        }
+    }
+    
+    /**
+     * V3.4 新增：重置会话已收金额（开始新支付会话时调用）
+     * 
+     * 注意：不清除 baseline（baseline 用于找零评估），只清除事件累加的金额
+     */
+    fun resetSessionPaidAmounts() = synchronized(lock) {
+        Log.d(TAG, "重置会话已收金额（事件驱动）")
+        sessionPaidAmounts.clear()
+    }
+    
+    /**
+     * V3.4 新增：重置指定设备的会话已收金额
+     */
+    fun resetDeviceSessionPaidAmounts(deviceID: String) = synchronized(lock) {
+        Log.d(TAG, "重置设备会话已收金额: deviceID=$deviceID")
+        sessionPaidAmounts.remove(deviceID)
+    }
+    
+    /**
+     * V3.4 新增：清除指定设备的会话已收金额（断开连接时调用）
+     */
+    fun clearDeviceSessionPaidAmounts(deviceID: String) = synchronized(lock) {
+        Log.d(TAG, "清除设备会话已收金额: deviceID=$deviceID")
+        sessionPaidAmounts.remove(deviceID)
     }
 }
