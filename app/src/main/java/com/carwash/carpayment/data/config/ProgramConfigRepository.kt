@@ -149,4 +149,30 @@ class ProgramConfigRepository(private val context: Context) {
         saveConfig(DEFAULT_CONFIG)
         Log.d(TAG, "配置已重置为默认值")
     }
+    
+    /**
+     * 更新程序配置（使用 WashProgramConfig 对象）
+     */
+    suspend fun updateProgram(program: WashProgramConfig) {
+        val currentConfig = getConfig()
+        val updatedPrograms = currentConfig.programs.map { existingProgram ->
+            if (existingProgram.id == program.id) {
+                program
+            } else {
+                existingProgram
+            }
+        }
+        saveConfig(WashProgramConfigList(updatedPrograms))
+        Log.d(TAG, "程序配置已更新: ${program.id}")
+    }
+    
+    /**
+     * 删除程序
+     */
+    suspend fun deleteProgram(programId: String) {
+        val currentConfig = getConfig()
+        val updatedPrograms = currentConfig.programs.filter { it.id != programId }
+        saveConfig(WashProgramConfigList(updatedPrograms))
+        Log.d(TAG, "程序已删除: $programId")
+    }
 }

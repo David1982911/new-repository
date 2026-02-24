@@ -474,10 +474,11 @@ data class ApiResponse(
  * 注意：服务器可能返回空数组 []，需要容错处理
  */
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class DeviceStatusResponse(
-    @SerialName("Type") val type: String? = null,  // 设备类型（如 "BILL_ACCEPTOR", "COIN_MECH"）
-    @SerialName("State") val state: String? = null,  // 状态枚举（如 "IDLE", "STARTED", "CONNECTED"）
-    @SerialName("StateAsString") val stateAsString: String? = null,  // 状态字符串（如 "Idle", "Started", "Connected"）
+    @SerialName("Type") @JsonNames("Type", "type") val type: String? = null,  // 设备类型（如 "BILL_ACCEPTOR", "COIN_MECH"），兼容大小写
+    @SerialName("State") @JsonNames("State", "state") val state: String? = null,  // 状态枚举（如 "IDLE", "STARTED", "CONNECTED"），兼容大小写
+    @SerialName("StateAsString") @JsonNames("StateAsString", "stateAsString") val stateAsString: String? = null,  // 状态字符串（如 "Idle", "Started", "Connected"），兼容大小写
     
     /**
      * V3.4 新增：事件列表（可选字段，向后兼容）

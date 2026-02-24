@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.carwash.carpayment.CarPaymentApplication
 import com.carwash.carpayment.data.cashdevice.CashDeviceClient
 import com.carwash.carpayment.data.cashdevice.CashDeviceRepository
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -29,9 +31,10 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         private const val ASSIGNMENT_POLL_INTERVAL_MS = 6000L // 面额轮询间隔 6秒
     }
     
-    private val api = CashDeviceClient.create(context = getApplication())
-    private val probeApi = CashDeviceClient.createWithTimeout(context = getApplication(), timeoutSeconds = 12L)
-    private val repository = CashDeviceRepository(api)
+    private val app = getApplication<CarPaymentApplication>()
+    private val repository = CarPaymentApplication.cashDeviceRepository
+    private val api = CarPaymentApplication.cashDeviceApi
+    private val probeApi = CarPaymentApplication.cashDeviceProbeApi
     
     // 纸币器状态
     data class DeviceState(
@@ -92,6 +95,10 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     private val billCmdMutex = kotlinx.coroutines.sync.Mutex()
     private val coinCmdMutex = kotlinx.coroutines.sync.Mutex()
     
+    // 面额数据加载标记（只刷新一次）
+    private var billAssignmentsLoaded = false
+    private var coinAssignmentsLoaded = false
+    
     /**
      * 设置页面可见性（页面进入/退出时调用）
      * @param visible true=页面可见, false=页面不可见
@@ -112,6 +119,26 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         } else {
             // 页面可见：启动当前激活设备的轮询
             addLog("页面可见 -> 可能启动轮询")
+            
+            // 兜底：立即读取当前值（不 repeat、不 delay）
+            viewModelScope.launch(Dispatchers.IO) {
+                val billId = repository.getBillAcceptorDeviceID()
+                val coinId = repository.getCoinAcceptorDeviceID()
+                Log.d(TAG, "DEVICE_TEST_VISIBLE billId=$billId coinId=$coinId repoId=${System.identityHashCode(repository)}")
+
+                if (!billId.isNullOrBlank() && !billAssignmentsLoaded) {
+                    _billAcceptorState.update { it.copy(deviceID = billId, isConnected = true) }
+                    billAssignmentsLoaded = true
+                    refreshAssignments(billId, isBill = true)
+                }
+
+                if (!coinId.isNullOrBlank() && !coinAssignmentsLoaded) {
+                    _coinAcceptorState.update { it.copy(deviceID = coinId, isConnected = true) }
+                    coinAssignmentsLoaded = true
+                    refreshAssignments(coinId, isBill = false)
+                }
+            }
+            
             if (activeDeviceIsBill) {
                 val deviceID = _billAcceptorState.value.deviceID
                 if (deviceID != null) {
@@ -145,6 +172,13 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
         }
         
         activeDeviceIsBill = isBill
+        
+        // 新增：立即刷新对应设备的面额
+        viewModelScope.launch(Dispatchers.IO) {
+            val id = if (isBill) _billAcceptorState.value.deviceID else _coinAcceptorState.value.deviceID
+            Log.d(TAG, "ASSIGNMENTS_ON_TAB_SWITCH isBill=$isBill id=$id")
+            if (!id.isNullOrBlank()) refreshAssignments(id, isBill)
+        }
         
         // 启动当前设备的轮询（如果页面可见且已连接）
         if (screenVisible) {
@@ -208,46 +242,96 @@ class CashDeviceTestViewModel(application: Application) : AndroidViewModel(appli
     }
     
     init {
-        // 监听 deviceID 变化
+        Log.d(TAG, "CashDeviceTestViewModel 使用单例: repoId=${System.identityHashCode(repository)}")
+        
+        // 纸币器 deviceID 订阅
         viewModelScope.launch {
-            repository.billAcceptorDeviceID.collect { deviceID ->
-                val currentState = _billAcceptorState.value
-                _billAcceptorState.value = currentState.copy(
-                    deviceID = deviceID,
-                    isConnected = deviceID != null
-                )
-                if (deviceID != null) {
-                    addLog("纸币器已连接: deviceID=$deviceID")
+            repository.billAcceptorDeviceIDFlow.collect { id ->
+                Log.d(TAG, "DEVICE_ID_FLOW bill received: $id")
+                if (!id.isNullOrBlank()) {
+                    _billAcceptorState.update { it.copy(deviceID = id, isConnected = true) }
+                    addLog("纸币器已连接: deviceID=$id")
+
+                    // ✅ 只在首次拿到 id 时刷新 assignments（避免重复请求）
+                    if (!billAssignmentsLoaded) {
+                        billAssignmentsLoaded = true
+                        viewModelScope.launch(Dispatchers.IO) {
+                            refreshAssignments(id, isBill = true)
+                        }
+                    }
+
                     // 只有当前激活设备是纸币器且页面可见时才启动轮询
                     if (activeDeviceIsBill && screenVisible) {
-                    startBillPolling(deviceID)
+                        startBillPolling(id)
                     }
                 } else {
+                    _billAcceptorState.update { it.copy(deviceID = null, isConnected = false) }
                     addLog("纸币器已断开")
                     stopBillPolling()
                 }
             }
         }
-        
+
+        // 硬币器 deviceID 订阅
         viewModelScope.launch {
-            repository.coinAcceptorDeviceID.collect { deviceID ->
-                val currentState = _coinAcceptorState.value
-                _coinAcceptorState.value = currentState.copy(
-                    deviceID = deviceID,
-                    isConnected = deviceID != null
-                )
-                if (deviceID != null) {
-                    addLog("硬币器已连接: deviceID=$deviceID")
+            repository.coinAcceptorDeviceIDFlow.collect { id ->
+                Log.d(TAG, "DEVICE_ID_FLOW coin received: $id")
+                if (!id.isNullOrBlank()) {
+                    _coinAcceptorState.update { it.copy(deviceID = id, isConnected = true) }
+                    addLog("硬币器已连接: deviceID=$id")
+
+                    // ✅ 只在首次拿到 id 时刷新 assignments
+                    if (!coinAssignmentsLoaded) {
+                        coinAssignmentsLoaded = true
+                        viewModelScope.launch(Dispatchers.IO) {
+                            refreshAssignments(id, isBill = false)
+                        }
+                    }
+
                     // 只有当前激活设备是硬币器且页面可见时才启动轮询
                     if (!activeDeviceIsBill && screenVisible) {
-                    startCoinPolling(deviceID)
+                        startCoinPolling(id)
                     }
                 } else {
+                    _coinAcceptorState.update { it.copy(deviceID = null, isConnected = false) }
                     addLog("硬币器已断开")
                     stopCoinPolling()
                 }
             }
         }
+    }
+    
+    /**
+     * 通用刷新面额数据方法（带详细日志）
+     */
+    private suspend fun refreshAssignments(deviceID: String, isBill: Boolean) {
+        try {
+            val assignments = repository.fetchCurrencyAssignments(deviceID)
+            if (isBill) {
+                _billAcceptorState.update { it.copy(deviceID = deviceID, assignments = assignments) }
+            } else {
+                _coinAcceptorState.update { it.copy(deviceID = deviceID, assignments = assignments) }
+            }
+            Log.d(TAG, "ASSIGNMENTS_REFRESH success isBill=$isBill deviceID=$deviceID size=${assignments.size}")
+        } catch (e: Exception) {
+            Log.e(TAG, "ASSIGNMENTS_REFRESH failed isBill=$isBill deviceID=$deviceID", e)
+        }
+    }
+
+    /**
+     * 刷新纸币器的面额数据（保留兼容性）
+     */
+    private suspend fun refreshBillCurrencyAssignments() {
+        val deviceID = _billAcceptorState.value.deviceID ?: return
+        refreshAssignments(deviceID, isBill = true)
+    }
+
+    /**
+     * 刷新硬币器的面额数据（保留兼容性）
+     */
+    private suspend fun refreshCoinCurrencyAssignments() {
+        val deviceID = _coinAcceptorState.value.deviceID ?: return
+        refreshAssignments(deviceID, isBill = false)
     }
     
     /**

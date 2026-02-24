@@ -174,9 +174,11 @@ class CashDeviceRepository(
     // Token 由 TokenStore 统一管理，不再在此处存储
     private val _billAcceptorDeviceID = MutableStateFlow<String?>(null)
     val billAcceptorDeviceID: StateFlow<String?> = _billAcceptorDeviceID.asStateFlow()
+    val billAcceptorDeviceIDFlow: StateFlow<String?> get() = _billAcceptorDeviceID
     
     private val _coinAcceptorDeviceID = MutableStateFlow<String?>(null)
     val coinAcceptorDeviceID: StateFlow<String?> = _coinAcceptorDeviceID.asStateFlow()
+    val coinAcceptorDeviceIDFlow: StateFlow<String?> get() = _coinAcceptorDeviceID
     
     /**
      * 获取纸币器设备ID（同步方法）
@@ -193,8 +195,10 @@ class CashDeviceRepository(
      * 仅在 OpenConnection 成功后调用
      */
     fun setBillAcceptorDeviceID(deviceID: String) {
+        Log.d(TAG, "设置纸币器 deviceID: $deviceID")
         _billAcceptorDeviceID.value = deviceID
         Log.d(TAG, "✅ 纸币器 DeviceID 已保存: $deviceID")
+        Log.d(TAG, "纸币器 deviceID 已设置")
     }
 
     /**
@@ -202,8 +206,10 @@ class CashDeviceRepository(
      * 仅在 OpenConnection 成功后调用
      */
     fun setCoinAcceptorDeviceID(deviceID: String) {
+        Log.d(TAG, "设置硬币器 deviceID: $deviceID")
         _coinAcceptorDeviceID.value = deviceID
         Log.d(TAG, "✅ 硬币器 DeviceID 已保存: $deviceID")
+        Log.d(TAG, "硬币器 deviceID 已设置")
     }
     
     /**
@@ -1421,7 +1427,9 @@ class CashDeviceRepository(
             }
             
             if (response.deviceID != null && response.IsOpen == true) {
+                Log.d(TAG, "设置纸币器 deviceID: ${response.deviceID}")
                 _billAcceptorDeviceID.value = response.deviceID
+                Log.d(TAG, "纸币器 deviceID 已设置")
                 Log.d(TAG, "纸币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}, isOpen=${response.IsOpen}")
                 Log.d(TAG, "设备ID获取成功: OpenConnection响应返回的deviceID=${response.deviceID}")
                 
@@ -1585,7 +1593,9 @@ class CashDeviceRepository(
             }
             
             if (response.deviceID != null && response.IsOpen == true) {
+                Log.d(TAG, "设置硬币器 deviceID: ${response.deviceID}")
                 _coinAcceptorDeviceID.value = response.deviceID
+                Log.d(TAG, "硬币器 deviceID 已设置")
                 Log.d(TAG, "硬币器连接成功: deviceID=${response.deviceID}, DeviceModel=${response.DeviceModel}, isOpen=${response.IsOpen}")
                 Log.d(TAG, "设备ID获取成功: OpenConnection响应返回的deviceID=${response.deviceID}")
                 
@@ -2100,7 +2110,7 @@ class CashDeviceRepository(
             // ⚠️ V3.1 优化：优先使用缓存状态（如果缓存未过期）
             val cached = lastKnownStatus[deviceID]
             if (cached != null && !isCacheExpired(cached)) {
-                val state = cached.status.actualState?.uppercase() ?: "UNKNOWN"
+                val state = (cached.status.stateAsString ?: cached.status.state)?.uppercase() ?: "UNKNOWN"
                 // 如果缓存状态是 CONNECTED、IDLE、STARTED 或 DISABLED，认为设备已连接
                 val isConnected = state == "CONNECTED" || 
                                  state == "IDLE" || 
@@ -2114,7 +2124,7 @@ class CashDeviceRepository(
             
             // 如果缓存不可用或显示有问题，通过 GetDeviceStatus API 验证
             val status = getDeviceStatus(deviceID)
-            val state = status.actualState?.uppercase() ?: "UNKNOWN"
+            val state = (status.stateAsString ?: status.state)?.uppercase() ?: "UNKNOWN"
             
             val isConnected = state == "CONNECTED" || 
                             state == "IDLE" || 
@@ -2137,7 +2147,7 @@ class CashDeviceRepository(
     private suspend fun isAcceptorEnabled(deviceID: String): Boolean {
         return try {
             val status = getDeviceStatus(deviceID)
-            val state = status.actualState?.uppercase() ?: "UNKNOWN"
+            val state = (status.stateAsString ?: status.state)?.uppercase() ?: "UNKNOWN"
             // 假设 IDLE、STARTED、CONNECTED 状态表示接收器已启用
             val isEnabled = state == "IDLE" || state == "STARTED" || state == "CONNECTED"
             Log.d(TAG, "isAcceptorEnabled: deviceID=$deviceID, state=$state, isEnabled=$isEnabled")
@@ -2158,7 +2168,7 @@ class CashDeviceRepository(
         // 如果没有，需要修改 GetDeviceStatus API 响应或通过其他方式获取
         return try {
             val status = getDeviceStatus(deviceID)
-            val state = status.actualState?.uppercase() ?: "UNKNOWN"
+            val state = (status.stateAsString ?: status.state)?.uppercase() ?: "UNKNOWN"
             // 假设 IDLE、STARTED 意味着自动接受已启用
             val isAutoAccept = state == "IDLE" || state == "STARTED"
             Log.d(TAG, "isAutoAcceptEnabled: deviceID=$deviceID, state=$state, isAutoAccept=$isAutoAccept")
@@ -2181,54 +2191,75 @@ class CashDeviceRepository(
             Log.d(TAG, "GetDeviceStatus 响应: rawCount=$rawCount")
             
             if (statusList.isEmpty()) {
-                // 空数组：返回缓存的上一次状态或 UNKNOWN
+                // ⚠️ V3.4 优化：空数组视为"无新事件"，永远优先返回 lastKnownStatus，不回落 UNKNOWN，不缓存 UNKNOWN
                 val cached = lastKnownStatus[deviceID]
-                if (cached != null && !isCacheExpired(cached)) {
-                    Log.d(TAG, "设备状态数组为空 []，沿用上次状态=${cached.status.actualState}: deviceID=$deviceID")
+                if (cached != null) {
+                    val cachedState = cached.status.stateAsString ?: cached.status.state
+                    Log.w(TAG, "GetDeviceStatus=[]，使用 lastKnownStatus（忽略过期）: deviceID=$deviceID, state=$cachedState")
                     return cached.status
                 } else {
-                    Log.d(TAG, "设备状态数组为空 []，无缓存或缓存已过期，返回 UNKNOWN: deviceID=$deviceID")
-                    val unknownStatus = DeviceStatusResponse(
+                    // 如果 cached 不存在：返回 UNKNOWN，但不要写入 lastKnownStatus（不要缓存 UNKNOWN）
+                    Log.w(TAG, "GetDeviceStatus=[]，无缓存，返回 UNKNOWN（不缓存）: deviceID=$deviceID")
+                    return DeviceStatusResponse(
                         type = null,
                         state = "UNKNOWN",
                         stateAsString = "Unknown"
                     )
-                    lastKnownStatus[deviceID] = CachedDeviceStatus(unknownStatus)  // 缓存 UNKNOWN 状态
-                    return unknownStatus
                 }
             }
             
-            // 取最后一个元素（通常代表最新状态）
-            val latestStatus = statusList.last()
-            val latestState = latestStatus.actualState ?: "UNKNOWN"
-            
-            Log.d(TAG, "GetDeviceStatus 最新状态: latestState=$latestState, rawCount=$rawCount")
-            
-            // 映射状态字符串到内部枚举（如果需要）
-            // 状态可能的值：IDLE, STARTED, CONNECTED, BUSY, ERROR, UNKNOWN 等
-            val mappedState = when (latestState.uppercase()) {
-                "IDLE", "IDLING" -> "IDLE"
-                "STARTED", "STARTING" -> "STARTED"
-                "CONNECTED", "CONNECTING" -> "CONNECTED"
-                "BUSY", "PROCESSING", "PROCESSINGNOTE", "PROCESSINGCOIN" -> "BUSY"
-                "ERROR", "FAILED", "FAULT" -> "ERROR"
-                "UNKNOWN" -> "UNKNOWN"
-                else -> {
-                    Log.w(TAG, "未知状态字符串: $latestState，映射为 UNKNOWN")
-                    "UNKNOWN"
-                }
+            // ⚠️ V3.5 修正：从返回队列中过滤出 Type == "DeviceStatusResponse" 的项（大小写不敏感）
+            val deviceStatusItems = statusList.filter { item ->
+                val itemType = item.type?.uppercase()?.trim()
+                itemType == "DEVICESTATUSRESPONSE" || itemType == null  // null 也视为状态项（向后兼容）
             }
             
-            // 如果状态字符串需要映射，创建一个新的响应对象
-            val finalStatus = if (mappedState != latestState.uppercase()) {
-                DeviceStatusResponse(
-                    type = latestStatus.type,
-                    state = mappedState,
-                    stateAsString = mappedState
-                )
+            // 取最后一个 DeviceStatusResponse 作为当前状态（不要用 response.last()）
+            val latestStatus = if (deviceStatusItems.isNotEmpty()) {
+                deviceStatusItems.last()
             } else {
-                latestStatus
+                // 如果没有找到 DeviceStatusResponse，使用整个列表的最后一个（向后兼容）
+                Log.w(TAG, "GetDeviceStatus: 未找到 Type=DeviceStatusResponse 的项，使用列表最后一个: deviceID=$deviceID")
+                statusList.last()
             }
+            
+            // ⚠️ V3.5 修正：状态解析逻辑
+            // 优先使用 state（如果是非空字符串），否则使用 stateAsString
+            // 对最终字符串做 trim() + uppercase()
+            // 若 State 为空/非字符串/为数字，则用 StateAsString 兜底
+            val rawState = latestStatus.state
+            val rawStateAsString = latestStatus.stateAsString
+            
+            // 检查 state 是否为有效字符串（非空、非数字）
+            val isValidStateString = rawState != null && 
+                rawState.trim().isNotEmpty() && 
+                !rawState.trim().matches(Regex("^\\d+$"))  // 不是纯数字
+            
+            val finalStateString = if (isValidStateString) {
+                rawState.trim().uppercase()
+            } else {
+                // 使用 stateAsString 兜底
+                (rawStateAsString?.trim()?.uppercase() ?: "UNKNOWN")
+            }
+            
+            // 记录最后一个 CashEventResponse（可选，仅日志）
+            // 事件可能包含在 DeviceStatusResponse 的 events 字段中
+            val lastEvent = latestStatus.getAllEvents().lastOrNull()
+            if (lastEvent != null) {
+                val eventType = lastEvent.eventTypeAsString ?: lastEvent.eventType
+                Log.d(TAG, "GetDeviceStatus: 最后一个事件: eventType=$eventType, value=${lastEvent.value}")
+            }
+            
+            // ⚠️ V3.5 修正：不再进行状态映射（不允许把 CONNECTING 强行映射为 CONNECTED，也不允许把 STARTING 映射为 STARTED）
+            // DISABLED 视为一种"正常可见状态"，不要当成错误或 UNKNOWN 导致重连
+            val finalStatus = DeviceStatusResponse(
+                type = latestStatus.type,
+                state = finalStateString,
+                stateAsString = finalStateString
+            )
+            
+            // 调试日志：打印最新 DeviceStatusResponse 的 raw state/stateAsString 以及最终解析结果
+            Log.d(TAG, "GetDeviceStatus 状态解析: deviceID=$deviceID, rawState=$rawState, rawStateAsString=$rawStateAsString, finalState=$finalStateString, rawCount=$rawCount")
             
             // ⚠️ V3.1 优化：更新缓存（带时间戳）
             lastKnownStatus[deviceID] = CachedDeviceStatus(finalStatus)
@@ -2241,7 +2272,8 @@ class CashDeviceRepository(
             // 返回缓存或 UNKNOWN
             val cached = lastKnownStatus[deviceID]
             if (cached != null && !isCacheExpired(cached)) {
-                Log.d(TAG, "返回缓存状态: ${cached.status.actualState}")
+                val cachedState = cached.status.stateAsString ?: cached.status.state
+                Log.d(TAG, "返回缓存状态: $cachedState")
                 return cached.status
             } else {
                 val unknownStatus = DeviceStatusResponse(
@@ -2259,7 +2291,8 @@ class CashDeviceRepository(
             // 返回缓存或 UNKNOWN
             val cached = lastKnownStatus[deviceID]
             if (cached != null && !isCacheExpired(cached)) {
-                Log.d(TAG, "返回缓存状态: ${cached.status.actualState}")
+                val cachedState = cached.status.stateAsString ?: cached.status.state
+                Log.d(TAG, "返回缓存状态: $cachedState")
                 return cached.status
             } else {
                 val unknownStatus = DeviceStatusResponse(

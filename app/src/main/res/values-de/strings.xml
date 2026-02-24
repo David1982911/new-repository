@@ -121,6 +121,7 @@
     <string name="device_test_reset_baseline">Sitzungsbaseline zurücksetzen</string>
     <string name="device_test_reset_baseline_hint">Baseline auf aktuellen Wert setzen (Delta wird null)</string>
     <string name="device_test_session_reset">Sitzung zurückgesetzt. Bitte Münzen/Scheine erneut einwerfen.</string>
+    <string name="device_test_wash_mode">Waschmodus</string>
     <string name="error_counters_read_failed">Gerätestatus kann nicht gelesen werden. Bitte wiederholen.</string>
     <string name="device_test_reset_cash_baseline">Cash Baseline zurücksetzen</string>
     

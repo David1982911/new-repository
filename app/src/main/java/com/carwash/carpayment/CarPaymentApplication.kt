@@ -2,6 +2,7 @@ package com.carwash.carpayment
 
 import android.app.Application
 import android.util.Log
+import com.carwash.carpayment.data.cashdevice.CashDeviceApi
 import com.carwash.carpayment.data.cashdevice.CashDeviceClient
 import com.carwash.carpayment.data.cashdevice.CashDeviceRepository
 import com.carwash.carpayment.data.cashdevice.device.CashDevice
@@ -22,7 +23,7 @@ import kotlinx.coroutines.launch
  * 
  * 根据 USDK 文档，USDK 应在 Application.onCreate() 中初始化
  */
-class CarPaymentApplication : Application() {
+open class CarPaymentApplication : Application() {
     
     companion object {
         private const val TAG = "CarPaymentApplication"
@@ -53,6 +54,13 @@ class CarPaymentApplication : Application() {
         @Volatile
         var cashDeviceStatusMonitor: CashDeviceStatusMonitor? = null
             private set
+        
+        // ⚠️ V3.4 新增：现金设备 Repository 和 API 单例（应用生命周期）
+        lateinit var cashDeviceRepository: CashDeviceRepository
+        
+        lateinit var cashDeviceApi: CashDeviceApi
+        
+        lateinit var cashDeviceProbeApi: CashDeviceApi
     }
     
     override fun onCreate() {
@@ -123,14 +131,24 @@ class CarPaymentApplication : Application() {
         // 因此 APP 启动后就应该初始化并连接纸币器/硬币器（只是默认不启用收款 enable）
         try {
             Log.d(TAG, "========== V3.2 APP 启动时初始化现金设备 ==========")
-            val cashDeviceApi = CashDeviceClient.create(context = this)
+            val api = CashDeviceClient.create(context = this)
+            val probeApi = CashDeviceClient.createWithTimeout(context = this, timeoutSeconds = 12L)
+            
+            // ⚠️ V3.4 新增：保存为单例（供全局使用）
+            cashDeviceApi = api
+            cashDeviceProbeApi = probeApi
+            cashDeviceRepository = CashDeviceRepository(api)
+            Log.d(TAG, "[CashDevice] ✅ Application 单例初始化: repoId=${System.identityHashCode(cashDeviceRepository)}, apiId=${System.identityHashCode(api)}")
             
             // ⚠️ V3.2 关键修复：创建 CashDeviceRepository 用于保存设备ID
-            val cashDeviceRepository = CashDeviceRepository(cashDeviceApi)
+            val cashDeviceRepository = CarPaymentApplication.cashDeviceRepository
             
-            // 创建设备驱动实例
-            val billAcceptor = SpectralPayoutDevice(cashDeviceApi)
-            val coinAcceptor = SmartCoinSystemDevice(cashDeviceApi)
+            // ⚠️ V3.4 新增：创建 OpenConnection 专用 API（超时 15 秒）
+            val openConnectionApi = CashDeviceClient.createForOpenConnection(context = this)
+            
+            // 创建设备驱动实例（初始化时使用 OpenConnection 专用 API）
+            val billAcceptor = SpectralPayoutDevice(openConnectionApi)
+            val coinAcceptor = SmartCoinSystemDevice(openConnectionApi)
             
             // 保存为单例
             CarPaymentApplication.billAcceptor = billAcceptor

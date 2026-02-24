@@ -125,6 +125,51 @@ object CashDeviceClient {
     }
     
     /**
+     * 创建用于 OpenConnection 的 Retrofit 实例（超时时间 15 秒）
+     * @param baseUrl 基础 URL，如果为 null 则从配置读取或使用默认值
+     * @param context 用于读取配置的 Context（可选）
+     */
+    fun createForOpenConnection(baseUrl: String? = null, context: Context? = null): CashDeviceApi {
+        val rawBaseUrl = baseUrl ?: getBaseUrl(context)
+        val normalizedBaseUrl = if (rawBaseUrl.endsWith("/")) rawBaseUrl else "$rawBaseUrl/"
+        
+        Log.d(TAG, "创建 OpenConnection 专用 CashDeviceApi，baseUrl: $normalizedBaseUrl, 超时: 15秒")
+        
+        // 先创建临时 API 实例用于 Interceptor（用于 401 重试时的重新认证）
+        val tempRetrofit = Retrofit.Builder()
+            .baseUrl(normalizedBaseUrl)
+            .addConverterFactory(json.asConverterFactory(contentType))
+            .build()
+        val tempApi = tempRetrofit.create(CashDeviceApi::class.java)
+        
+        // 创建授权拦截器（自动添加 Authorization 头，处理 401）
+        val authInterceptor = AuthorizationInterceptor(tempApi)
+        
+        val loggingInterceptor = HttpLoggingInterceptor { message ->
+            Log.d(TAG, message)
+        }.apply {
+            level = HttpLoggingInterceptor.Level.BODY
+        }
+        
+        // OpenConnection 专用 OkHttpClient：超时时间 15 秒
+        val okHttpClient = OkHttpClient.Builder()
+            .addInterceptor(authInterceptor)
+            .addInterceptor(loggingInterceptor)
+            .cookieJar(cookieJar)
+            .connectTimeout(15, TimeUnit.SECONDS)  // OpenConnection 需要更长的连接超时
+            .readTimeout(15, TimeUnit.SECONDS)  // OpenConnection 需要更长的读取超时
+            .writeTimeout(15, TimeUnit.SECONDS)  // OpenConnection 需要更长的写入超时
+            .build()
+        
+        return Retrofit.Builder()
+            .baseUrl(normalizedBaseUrl)
+            .client(okHttpClient)
+            .addConverterFactory(json.asConverterFactory(contentType))
+            .build()
+            .create(CashDeviceApi::class.java)
+    }
+    
+    /**
      * 创建 Retrofit 实例
      * @param baseUrl 基础 URL，如果为 null 则从配置读取或使用默认值
      * @param context 用于读取配置的 Context（可选）

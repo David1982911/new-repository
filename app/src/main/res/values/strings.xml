@@ -165,6 +165,7 @@
     <string name="device_test_bill_acceptor">Geldscheinakzeptor</string>
     <string name="device_test_coin_acceptor">Münzakzeptor</string>
     <string name="device_test_printer">Drucker</string>
+    <string name="device_test_wash_mode">Waschmodus</string>
     <string name="device_test_connected">Verbunden</string>
     <string name="device_test_disconnected">Nicht verbunden</string>
     <string name="device_test_enabled">Annahme aktiviert</string>

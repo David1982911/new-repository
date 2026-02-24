@@ -27,17 +27,18 @@ class CashDeviceInitializer(
     }
     
     /**
-     * 初始化设备连接
+     * 初始化设备连接（串行执行，避免并发超时）
      * ⚠️ 仅在 Application.onCreate() 中调用一次
      * 失败不影响整体启动，仅记录日志
      * 
      * ⚠️ 关键修复：OpenConnection 成功后，将 DeviceID 保存到 Repository
      */
     suspend fun initialize() {
-        Log.d(TAG, "========== 开始初始化现金设备连接 ==========")
+        Log.d(TAG, "========== 开始初始化现金设备连接（串行执行） ==========")
         
-        // 纸币器连接
+        // 纸币器连接（串行执行）
         runCatching {
+            Log.d(TAG, "开始连接纸币器: port=$BILL_PORT, sspAddress=$BILL_SSP_ADDRESS")
             val success = billAcceptor.openConnection(BILL_PORT, BILL_SSP_ADDRESS)
             if (success) {
                 val deviceID = billAcceptor.getDeviceID()
@@ -45,6 +46,7 @@ class CashDeviceInitializer(
                     Log.d(TAG, "✅ 纸币器连接成功: deviceID=$deviceID")
                     // ⚠️ 关键修复：保存设备ID到 Repository
                     repository?.setBillAcceptorDeviceID(deviceID)
+                    Log.d(TAG, "纸币器 deviceID 已保存到 Repository")
                 } else {
                     Log.w(TAG, "⚠️ 纸币器连接成功但 deviceID 为空")
                 }
@@ -55,8 +57,9 @@ class CashDeviceInitializer(
             Log.e(TAG, "纸币器连接异常（不影响整体启动）", e)
         }
         
-        // 硬币器连接
+        // 硬币器连接（串行执行，等待纸币器完成）
         runCatching {
+            Log.d(TAG, "开始连接硬币器: port=$COIN_PORT, sspAddress=$COIN_SSP_ADDRESS")
             val success = coinAcceptor.openConnection(COIN_PORT, COIN_SSP_ADDRESS)
             if (success) {
                 val deviceID = coinAcceptor.getDeviceID()
@@ -64,6 +67,7 @@ class CashDeviceInitializer(
                     Log.d(TAG, "✅ 硬币器连接成功: deviceID=$deviceID")
                     // ⚠️ 关键修复：保存设备ID到 Repository
                     repository?.setCoinAcceptorDeviceID(deviceID)
+                    Log.d(TAG, "硬币器 deviceID 已保存到 Repository")
                 } else {
                     Log.w(TAG, "⚠️ 硬币器连接成功但 deviceID 为空")
                 }

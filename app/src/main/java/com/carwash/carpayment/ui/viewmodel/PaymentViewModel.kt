@@ -33,6 +33,8 @@ import com.carwash.carpayment.data.pos.UsdkPosPaymentService
 import com.carwash.carpayment.data.printer.ReceiptPrintService
 import com.carwash.carpayment.data.printer.ReceiptPrinter
 import com.carwash.carpayment.data.printer.ReceiptSettingsRepository
+import com.carwash.carpayment.data.transaction.TransactionRepository
+import com.carwash.carpayment.data.transaction.TransactionResult
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -110,6 +112,11 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
     private val receiptSettingsRepository by lazy { ReceiptSettingsRepository(getApplication()) }
     private val receiptPrintService by lazy { 
         ReceiptPrintService(getApplication(), receiptPrinter, receiptSettingsRepository) 
+    }
+    
+    // 交易记录仓库
+    private val transactionRepository: TransactionRepository by lazy {
+        TransactionRepository(getApplication())
     }
     
     // 支付流程状态（使用状态机）
@@ -582,6 +589,26 @@ class PaymentViewModel(application: Application) : AndroidViewModel(application)
                 if (paidCents >= targetAmountCents) {
                     Log.d(TAG, "========== 支付完成（V3.4 事件驱动） ==========")
                     Log.d(TAG, "insertedCents=${paidCents}分 >= amountCents=${targetAmountCents}分, 触发支付成功")
+                    
+                    // ⚠️ 插入交易记录
+                    val program = _flowState.value.selectedProgram
+                    if (program != null) {
+                        try {
+                            val id = transactionRepository.insertTransaction(
+                                programId = program.id.toString(),
+                                programName = program.name,
+                                paymentMethod = PaymentMethod.CASH,
+                                amount = targetAmountCents / 100.0,
+                                result = TransactionResult.SUCCESS
+                            )
+                            Log.d("DB_INSERT", "交易插入成功, ID=$id")
+                        } catch (e: Exception) {
+                            Log.e("DB_INSERT", "交易插入失败", e)
+                        }
+                    } else {
+                        Log.w("DB_INSERT", "交易插入失败: program 为 null")
+                    }
+                    
                     // ⚠️ V3.2 超时处理：支付成功，取消超时监控
                     handlePaymentSuccess()
                     return paidCents.toInt()
@@ -3693,6 +3720,27 @@ private suspend fun cleanupDisableAcceptors(
                     "金额=${paymentResult.amountCents}分 (${paymentResult.amountCents / 100.0}€)"
                 )
                     Log.d(TAG, "====================================")
+
+                    // ⚠️ 插入交易记录（POS 支付）
+                    viewModelScope.launch {
+                        try {
+                            val program = currentState.selectedProgram
+                            if (program != null) {
+                                val id = transactionRepository.insertTransaction(
+                                    programId = program.id.toString(),
+                                    programName = program.name,
+                                    paymentMethod = PaymentMethod.CARD,  // 支付方式为卡支付
+                                    amount = paymentResult.amountCents / 100.0,
+                                    result = TransactionResult.SUCCESS
+                                )
+                                Log.d("DB_INSERT", "POS 交易插入成功, ID=$id")
+                            } else {
+                                Log.e("DB_INSERT", "POS 支付成功但 program 为 null，无法插入交易")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("DB_INSERT", "POS 交易插入失败", e)
+                        }
+                    }
                     
                     // ⚠️ V3.4 规范：PaymentAuthorized 立即打印（不依赖 GateCheck/PLC/Running/Completed）
                     val successState = stateMachine.paymentSuccess(_flowState.value)
@@ -3734,6 +3782,37 @@ private suspend fun cleanupDisableAcceptors(
      */
     fun handlePaymentFailure(errorMessage: String) {
         val currentState = _flowState.value
+
+        // ========== 新增：记录失败订单 ==========
+        viewModelScope.launch {
+            try {
+                val program = currentState.selectedProgram
+                if (program != null) {
+                    // 获取已支付金额（仅现金支付可能有已收款）
+                    val paidAmount = when (currentState.selectedPaymentMethod) {
+                        PaymentMethod.CASH -> {
+                            // 从金额跟踪器获取实际收款金额（单位：分），转换为元
+                            cashDeviceRepository.getAmountTracker().getTotalCents() / 100.0
+                        }
+                        else -> 0.0
+                    }
+                    val id = transactionRepository.insertTransaction(
+                        programId = program.id.toString(),
+                        programName = program.name,
+                        paymentMethod = currentState.selectedPaymentMethod ?: PaymentMethod.CASH,
+                        amount = program.price,                // 目标金额
+                        result = TransactionResult.CANCELLED   // 使用取消状态
+                    )
+                    Log.d("DB_INSERT", "失败订单插入成功, ID=$id, paidAmount=$paidAmount")
+                } else {
+                    Log.e("DB_INSERT", "支付失败但 program 为 null，无法插入订单")
+                }
+            } catch (e: Exception) {
+                Log.e("DB_INSERT", "失败订单插入失败", e)
+            }
+        }
+        // ========== 新增结束 ==========
+
     // 如果是现金支付失败，确保禁用接收器但不断开连接
     if (currentState.selectedPaymentMethod == PaymentMethod.CASH) {
         viewModelScope.launch {
@@ -3810,6 +3889,37 @@ private suspend fun cleanupDisableAcceptors(
  */
 fun handlePaymentFailureByReason(reason: com.carwash.carpayment.data.carwash.CarWashGateCheckFailureReason) {
     val currentState = _flowState.value
+
+    // ========== 新增：记录失败订单 ==========
+    viewModelScope.launch {
+        try {
+            val program = currentState.selectedProgram
+            if (program != null) {
+                // 获取已支付金额（仅现金支付可能有已收款）
+                val paidAmount = when (currentState.selectedPaymentMethod) {
+                    PaymentMethod.CASH -> {
+                        // 从金额跟踪器获取实际收款金额（单位：分），转换为元
+                        cashDeviceRepository.getAmountTracker().getTotalCents() / 100.0
+                    }
+                    else -> 0.0
+                }
+                val id = transactionRepository.insertTransaction(
+                    programId = program.id.toString(),
+                    programName = program.name,
+                    paymentMethod = currentState.selectedPaymentMethod ?: PaymentMethod.CASH,
+                    amount = program.price,                // 目标金额
+                    result = TransactionResult.CANCELLED   // 使用取消状态
+                )
+                Log.d("DB_INSERT", "失败订单插入成功, ID=$id, paidAmount=$paidAmount")
+            } else {
+                Log.e("DB_INSERT", "支付失败但 program 为 null，无法插入订单")
+            }
+        } catch (e: Exception) {
+            Log.e("DB_INSERT", "失败订单插入失败", e)
+        }
+    }
+    // ========== 新增结束 ==========
+
     // 传递错误码而不是硬编码消息，UI 层根据 reason 映射到 stringResource
     val errorCode = when (reason) {
         com.carwash.carpayment.data.carwash.CarWashGateCheckFailureReason.COMMUNICATION_FAILED -> "COMMUNICATION_FAILED"

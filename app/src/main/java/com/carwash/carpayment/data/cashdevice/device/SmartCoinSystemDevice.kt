@@ -92,6 +92,12 @@ class SmartCoinSystemDevice(
             val statusList = api.getDeviceStatus(deviceID)
             
             if (statusList.isEmpty()) {
+                // ⚠️ V3.4 优化：空数组时保留上一次有效状态
+                val lastStatus = _lastDeviceStatus
+                if (lastStatus != null && lastStatus.online) {
+                    Log.d(TAG, "GetDeviceStatus 返回空数组，保留上一次在线状态")
+                    return lastStatus  // 保留上一次有效状态
+                }
                 _isOnline = false
                 return DeviceStatus(online = false, state = "UNKNOWN", error = "设备状态数组为空")
             }

@@ -2,6 +2,8 @@ package com.carwash.carpayment.data.cashdevice.device
 
 import android.util.Log
 import com.carwash.carpayment.data.cashdevice.CashPaymentConfig
+import com.carwash.carpayment.data.cashdevice.device.SpectralPayoutDevice
+import com.carwash.carpayment.data.cashdevice.device.SmartCoinSystemDevice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -77,6 +79,7 @@ class CashDeviceStatusMonitor(
      * ⚠️ V3.2 规范：使用 GetDeviceStatus 定期轮询设备健康状态
      * ⚠️ 使用 runCatching 捕获异常，避免监测服务崩溃
      * ⚠️ 设备层已缓存最后一次 GetDeviceStatus 结果（通过 isOnline 属性）
+     * ⚠️ V3.4 优化：GetDeviceStatus 返回空数组时，保留上一次有效状态
      */
     private suspend fun updateStatus() {
         // 更新纸币器状态（设备层已缓存最后一次结果）
@@ -84,14 +87,34 @@ class CashDeviceStatusMonitor(
             // ⚠️ V3.2：使用 GetDeviceStatus 进行健康监测
             val status = billAcceptor.getDeviceStatus()
             status.online
-        }.getOrDefault(false)
+        }.getOrElse { e ->
+            // ⚠️ V3.4 优化：如果 GetDeviceStatus 失败（空数组或异常），保留上一次有效状态
+            val lastStatus = (billAcceptor as? SpectralPayoutDevice)?.getLastDeviceStatus()
+            if (lastStatus != null && lastStatus.online) {
+                Log.d(TAG, "纸币器 GetDeviceStatus 失败，保留上一次在线状态: ${e.message}")
+                true  // 保留上一次在线状态
+            } else {
+                Log.d(TAG, "纸币器 GetDeviceStatus 失败且无有效缓存: ${e.message}")
+                false
+            }
+        }
         
         // 更新硬币器状态（设备层已缓存最后一次结果）
         _coinOnline.value = runCatching {
             // ⚠️ V3.2：使用 GetDeviceStatus 进行健康监测
             val status = coinAcceptor.getDeviceStatus()
             status.online
-        }.getOrDefault(false)
+        }.getOrElse { e ->
+            // ⚠️ V3.4 优化：如果 GetDeviceStatus 失败（空数组或异常），保留上一次有效状态
+            val lastStatus = (coinAcceptor as? SmartCoinSystemDevice)?.getLastDeviceStatus()
+            if (lastStatus != null && lastStatus.online) {
+                Log.d(TAG, "硬币器 GetDeviceStatus 失败，保留上一次在线状态: ${e.message}")
+                true  // 保留上一次在线状态
+            } else {
+                Log.d(TAG, "硬币器 GetDeviceStatus 失败且无有效缓存: ${e.message}")
+                false
+            }
+        }
         
         // 仅在状态变化时记录日志（避免日志过多）
         // if (_billOnline.value || _coinOnline.value) {

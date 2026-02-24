@@ -35,9 +35,22 @@ class TransactionRepository(application: Application) {
             amount = amount,
             result = result
         )
-        val id = transactionDao.insert(transaction)
-        Log.d(TAG, "交易记录已插入，ID: $id")
-        return id
+        // 添加日志，记录交易准备插入
+        Log.d("DB_INSERT", "准备插入交易: $transaction")
+        
+        return try {
+            val id = transactionDao.insert(transaction)
+            // 插入成功后的日志
+            Log.d("DB_INSERT", "插入成功, ID: $id")
+            // 保留原有的 TAG 日志，便于其他调试
+            Log.d(TAG, "交易记录已插入，ID: $id")
+            id
+        } catch (e: Exception) {
+            // 插入失败的日志
+            Log.e("DB_INSERT", "插入失败", e)
+            // 抛出异常，保持原有行为（调用方可能需要处理）
+            throw e
+        }
     }
     
     /**

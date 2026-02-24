@@ -7,15 +7,19 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -26,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -46,8 +51,10 @@ import com.carwash.carpayment.R
 import android.os.Process
 import com.carwash.carpayment.data.cashdevice.CurrencyAssignment
 import com.carwash.carpayment.data.cashdevice.CashAmountTracker
+import com.carwash.carpayment.data.WashProgram
 import com.carwash.carpayment.ui.viewmodel.CashDeviceTestViewModel
 import com.carwash.carpayment.ui.viewmodel.PrinterTabViewModel
+import com.carwash.carpayment.ui.viewmodel.WashModeTestViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 /**
@@ -106,21 +113,6 @@ fun DeviceTestScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                // ⚠️ Step B: 重置现金支付 baseline 按钮
-                Button(
-                    onClick = {
-                        Log.d("DeviceTestScreen", "重置现金支付 baseline 按钮被点击")
-                        viewModel.resetCashBaseline()
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.tertiary
-                    )
-                ) {
-                    Text(
-                        text = stringResource(R.string.device_test_reset_cash_baseline),
-                        fontSize = 12.sp
-                    )
-                }
                 // 退出APP按钮
                 Button(
                     onClick = {
@@ -167,14 +159,20 @@ fun DeviceTestScreen(
                 },
                 text = { Text(stringResource(R.string.device_test_printer)) }
             )
+            Tab(
+                selected = selectedTabIndex == 3,
+                onClick = {
+                    selectedTabIndex = 3
+                },
+                text = { Text(stringResource(R.string.device_test_wash_mode)) }
+            )
         }
 
         // 内容区域（根据选中的选项卡显示）
     Column(
         modifier = Modifier
             .fillMaxSize()
-                .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
+                .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -182,6 +180,11 @@ fun DeviceTestScreen(
             if (selectedTabIndex == 2) {
                 // 打印机测试区域
                 PrinterTab(viewModel = printerTabViewModel)
+            } else if (selectedTabIndex == 3) {
+                // Wash Mode 测试区域
+                Box(modifier = Modifier.fillMaxSize()) {
+                    WashModeTab()
+                }
             } else if (selectedTabIndex == 0) {
         // 纸币器测试区域
                 val isEditMode by viewModel.isEditMode.collectAsState()
@@ -265,23 +268,8 @@ fun DeviceTestScreen(
                 )
             }
 
-            // 开始新会话按钮（仅现金设备 Tab 显示）
-            if (selectedTabIndex != 2) {
-                Button(
-                    onClick = { viewModel.startNewSession() },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.tertiary
-                    )
-                ) {
-                    Text(
-                        text = stringResource(R.string.device_test_start_new_session),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // 测试日志区域（仅现金设备 Tab 显示）
+            // 测试日志区域（仅现金设备 Tab 显示）
+            if (selectedTabIndex != 2 && selectedTabIndex != 3) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -406,21 +394,6 @@ private fun DeviceTestCard(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
-
-                Surface(
-                    color = if (isConnected) 
-                        MaterialTheme.colorScheme.primary 
-                    else 
-                        MaterialTheme.colorScheme.error,
-                    shape = MaterialTheme.shapes.small
-                ) {
-                    Text(
-                        text = if (isConnected) stringResource(R.string.device_test_connected) else stringResource(R.string.device_test_disconnected),
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontSize = 14.sp
-                    )
-                }
             }
             
             if (deviceID != null) {
@@ -428,106 +401,6 @@ private fun DeviceTestCard(
                     text = stringResource(R.string.device_test_device_id, deviceID),
                     style = MaterialTheme.typography.bodyMedium
                 )
-            }
-            
-            // 事件统计 + 收款启用状态
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = stringResource(R.string.device_test_event_count, eventCount),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-
-                    Surface(
-                    color = if (isEnabled) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
-                        shape = MaterialTheme.shapes.small
-                    ) {
-                        Text(
-                        text = if (isEnabled) stringResource(R.string.device_test_enabled) else stringResource(R.string.device_test_disabled),
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                        color = if (isEnabled) MaterialTheme.colorScheme.onSecondary else MaterialTheme.colorScheme.onError,
-                            fontSize = 14.sp
-                        )
-                    }
-                }
-
-            if (lastStatus != null) {
-                Text(
-                    text = stringResource(R.string.device_test_status, lastStatus),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-
-            if (lastEvent != null) {
-                Text(
-                    text = stringResource(R.string.device_test_last_event, lastEvent),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-            
-            HorizontalDivider()
-
-            // 实时金额
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // ⚠️ 会话基线信息（baseline/current/delta）- 用于现场验证
-                    // 注意：baseline 来自硬件累计计数，App 只在会话内用 delta 计算
-                    if (deviceID != null) {
-                        Text(
-                            text = stringResource(R.string.device_test_baseline_info, 
-                                String.format("%.2f", baselineAmount),
-                                String.format("%.2f", currentAmount),
-                                String.format("%.2f", deltaAmount)
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    }
-                    
-                    Text(
-                        text = stringResource(R.string.device_test_session_amount, String.format("%.2f", sessionAmount), sessionAmountCents),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = stringResource(R.string.device_test_total_amount, String.format("%.2f", totalAmount), totalAmountCents),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-
-                    if (recentChanges.isNotEmpty()) {
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                        Text(
-                            text = stringResource(R.string.device_test_recent_changes),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        recentChanges.forEach { change ->
-                            Text(
-                                text = change.getDisplayText(),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (change.count > 0)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.error
-                            )
-                        }
-                    }
-                }
             }
 
             // 面额列表
@@ -982,4 +855,191 @@ private fun DeviceTestCard(
             }
         }
     }
+}
+
+/**
+ * Wash Mode Tab Component
+ */
+@Composable
+fun WashModeTab(
+    viewModel: WashModeTestViewModel = viewModel()
+) {
+    val programs by viewModel.programs.collectAsState()
+    var editingProgram by remember { mutableStateOf<WashProgram?>(null) }
+    var showDeleteConfirm by remember { mutableStateOf<String?>(null) }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = stringResource(R.string.device_test_wash_mode),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold
+        )
+
+        if (programs.isEmpty()) {
+            Text("暂无洗车模式")
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(programs) { program ->
+                    WashModeItem(
+                        program = program,
+                        onEdit = { editingProgram = program },
+                        onDelete = { showDeleteConfirm = program.id }
+                    )
+                }
+            }
+        }
+    }
+
+    // 编辑对话框
+    if (editingProgram != null) {
+        EditProgramDialog(
+            program = editingProgram!!,
+            onDismiss = { editingProgram = null },
+            onSave = { updatedProgram -> 
+                viewModel.updateProgram(updatedProgram)
+                editingProgram = null
+            }
+        )
+    }
+
+    // 删除确认对话框
+    if (showDeleteConfirm != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = null },
+            title = { Text("确认删除") },
+            text = { Text("确定要删除此洗车模式吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm?.let { programId ->
+                            viewModel.deleteProgram(programId)
+                        }
+                        showDeleteConfirm = null
+                    }
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun WashModeItem(
+    program: WashProgram,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = program.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "价格: ${program.price}€ (${(program.price * 100).toInt()}分)",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onEdit,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Text("编辑")
+                }
+                Button(
+                    onClick = onDelete,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("删除")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EditProgramDialog(
+    program: WashProgram,
+    onDismiss: () -> Unit,
+    onSave: (WashProgram) -> Unit
+) {
+    var name by remember { mutableStateOf(program.name) }
+    var priceText by remember { mutableStateOf(program.price.toString()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑洗车模式") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("名称") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                TextField(
+                    value = priceText,
+                    onValueChange = { priceText = it },
+                    label = { Text("价格 (€)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val price = priceText.toDoubleOrNull()
+                    if (name.isNotBlank() && price != null && price > 0) {
+                        onSave(
+                            program.copy(
+                                name = name,
+                                price = price
+                            )
+                        )
+                    }
+                }
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }

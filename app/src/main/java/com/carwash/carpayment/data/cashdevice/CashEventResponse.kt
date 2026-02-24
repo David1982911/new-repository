@@ -1,7 +1,9 @@
 package com.carwash.carpayment.data.cashdevice
 
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonNames
 
 /**
  * 现金事件响应（V3.4 规范：事件驱动收款）
@@ -10,16 +12,17 @@ import kotlinx.serialization.Serializable
  * 事件类型包括：STORED, STACKED, VALUE_ADDED, COIN_CREDIT
  */
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class CashEventResponse(
     /**
      * 事件类型（字符串形式，如 "STORED", "STACKED", "VALUE_ADDED", "COIN_CREDIT"）
      */
-    @SerialName("EventType") val eventType: String? = null,
+    @SerialName("EventType") @JsonNames("EventType", "eventType") val eventType: String? = null,
     
     /**
      * 事件类型（字符串形式，兼容字段名）
      */
-    @SerialName("EventTypeAsString") val eventTypeAsString: String? = null,
+    @SerialName("EventTypeAsString") @JsonNames("EventTypeAsString", "eventTypeAsString") val eventTypeAsString: String? = null,
     
     /**
      * 事件金额（分）
